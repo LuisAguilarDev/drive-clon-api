@@ -21,7 +21,6 @@ venv.bak/
 *.sublime-project
 
 # Configuración de VSCode
-.vscode/settings.json
 .vscode/launch.json
 .vscode/tasks.json
 
@@ -70,8 +69,6 @@ coverage.xml
 
 # Docker
 *.dockerignore
-Dockerfile
-docker-compose.yml
 
 # Archivos temporales
 *.temp
