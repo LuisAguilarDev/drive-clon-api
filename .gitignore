@@ -1,0 +1,91 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C Extensions
+*.so
+
+# Environments
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs y editores
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# Configuración de VSCode
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
+
+# Archivos de configuración y entornos
+*.env
+*.env.*
+
+# Log files
+*.log
+
+# Pip y archivos relacionados
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Archivos de paquetes y distribuciones
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pytest
+.pytest_cache/
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# PyCharm
+*.iml
+.idea/
+
+# Docker
+*.dockerignore
+Dockerfile
+docker-compose.yml
+
+# Archivos temporales
+*.temp
+*.tmp
+*.swp
+*.swo
+*.bak
+
+# Configuración de OS
+.DS_Store
+Thumbs.db
+
+# Archivos generados por FastAPI
+openapi.json
+
+# Otros
+logs/
