@@ -6,8 +6,22 @@ from sqlalchemy.orm import Session
 from app.routes import auth
 from app.routes.auth import get_current_user
 import app.models as models
+from app.core.config import settings
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI()
 app.include_router(auth.router)
+
+allowed_origins = settings.ALLOWED_ORIGINS.split(",")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,  # Usar dominios permitidos de .env
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 Base.metadata.create_all(bind=engine)
 def get_db():
     db = SessionLocal()

@@ -6,3 +6,6 @@ class Users(Base):
     id = Column(Integer,primary_key=True, index=True)
     email=Column(String,unique=True)
     password = Column(String)
+    name = Column(String)
+    picture = Column(String, default="")
+    provider = Column(String, default="google")

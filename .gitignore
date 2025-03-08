@@ -86,3 +86,5 @@ openapi.json
 
 # Otros
 logs/
+
+serviceAccountKey.json
