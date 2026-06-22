@@ -90,3 +90,6 @@ openapi.json
 logs/
 
 serviceAccountKey.json
+
+# PRDs (documentos de trabajo, no se versionan)
+docs/PRD/
