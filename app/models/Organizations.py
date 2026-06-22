@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Column, DateTime, Integer, String
 
 from app.db.database import Base
 
@@ -16,3 +16,5 @@ class Organizations(Base):
     id = Column(Integer, primary_key=True, index=True)
     keycloak_org_id = Column(String, unique=True, nullable=False, index=True)
     name = Column(String, nullable=False)
+    # Soft delete: una fila está "viva" cuando deleted_at IS NULL.
+    deleted_at = Column(DateTime(timezone=True), nullable=True, default=None)

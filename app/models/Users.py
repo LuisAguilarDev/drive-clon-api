@@ -1,4 +1,4 @@
-from sqlalchemy import Column, ForeignKey, Integer, String
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String
 
 from app.db.database import Base
 
@@ -19,3 +19,5 @@ class Users(Base):
     name = Column(String, default="")
     picture = Column(String, default="")
     org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
+    # Soft delete: una fila está "viva" cuando deleted_at IS NULL.
+    deleted_at = Column(DateTime(timezone=True), nullable=True, default=None)

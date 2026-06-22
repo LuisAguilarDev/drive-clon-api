@@ -10,7 +10,10 @@ class UserRepository:
 
     async def find_by_sub(self, keycloak_sub: str) -> Users | None:
         result = await self.db.execute(
-            select(Users).where(Users.keycloak_sub == keycloak_sub)
+            select(Users).where(
+                Users.keycloak_sub == keycloak_sub,
+                Users.deleted_at.is_(None),
+            )
         )
         return result.scalars().first()
 

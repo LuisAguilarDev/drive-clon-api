@@ -1,4 +1,4 @@
-from sqlalchemy import Column, ForeignKey, Integer, String
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String
 
 from app.db.database import Base
 
@@ -10,3 +10,5 @@ class Files(Base):
     address = Column(String, index=True)
     # Aislamiento de tenant: toda consulta de ficheros se filtra por `org_id`.
     org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
+    # Soft delete: una fila está "viva" cuando deleted_at IS NULL.
+    deleted_at = Column(DateTime(timezone=True), nullable=True, default=None)

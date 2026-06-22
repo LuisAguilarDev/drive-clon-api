@@ -10,7 +10,10 @@ class OrganizationRepository:
 
     async def find_by_id(self, org_id: int) -> Organizations | None:
         result = await self.db.execute(
-            select(Organizations).where(Organizations.id == org_id)
+            select(Organizations).where(
+                Organizations.id == org_id,
+                Organizations.deleted_at.is_(None),
+            )
         )
         return result.scalars().first()
 
