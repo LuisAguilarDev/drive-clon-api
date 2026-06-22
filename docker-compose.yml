@@ -1,0 +1,182 @@
+# Desarrollo local 100% en Docker — Drive Clon (POC)
+#
+# Ejecutar desde ESTA carpeta (drive-clon-fast-api/).
+# Asume que el frontend (drive-clon-ui) está clonado como carpeta HERMANA:
+#   <padre>/drive-clon-fast-api/   (este repo, con el compose)
+#   <padre>/drive-clon-ui/         (referenciado vía ../drive-clon-ui)
+#
+#   docker compose up -d        # levanta todo
+#   docker compose logs -f      # ver logs
+#   docker compose down         # parar (conserva volúmenes/datos)
+#   docker compose down -v      # parar y BORRAR datos (postgres + minio)
+#
+# Servicios y puertos:
+#   frontend  5173   backend  8000   keycloak 8080   minio 9000/9001   postgres 5432
+
+name: driveclon
+
+services:
+  # ---------------------------------------------------------------- PostgreSQL
+  postgres:
+    image: postgres:16
+    container_name: driveclon-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: driveclon
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d driveclon"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------- MinIO
+  minio:
+    image: quay.io/minio/minio
+    container_name: driveclon-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"   # API S3
+      - "9001:9001"   # Consola web
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Job de un solo uso: crea el bucket "driveclon" y termina.
+  minio-init:
+    image: quay.io/minio/mc
+    container_name: driveclon-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/driveclon &&
+      echo 'Bucket driveclon listo';
+      "
+
+  # ------------------------------------------------------------------- Keycloak
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: driveclon-keycloak
+    command: start-dev --features=organization
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    ports:
+      - "8080:8080"
+    # POC: start-dev usa H2 en memoria (no persiste entre recreaciones).
+
+  # Job de un solo uso: crea el realm `driveclon`, el client `driveclon-ui` y el
+  # IdP de Google (si hay credenciales), luego termina. Idempotente: se re-aplica
+  # en cada recreación de Keycloak (H2 en memoria no persiste). Mismo patrón que
+  # `minio-init`.
+  keycloak-init:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: driveclon-keycloak-init
+    depends_on:
+      keycloak:
+        condition: service_started
+    entrypoint: ["/bin/bash", "/keycloak/init-keycloak.sh"]
+    environment:
+      KC_SERVER: http://keycloak:8080
+      KC_ADMIN: admin
+      KC_ADMIN_PASSWORD: admin
+      KC_REALM: driveclon
+      KC_CLIENT_ID: driveclon-ui
+      APP_ORIGIN: http://localhost:5173
+      # Client confidencial del backend (service account). El secreto se comparte
+      # con el backend; en local usa el default, en real viene del `.env`.
+      KC_BACKEND_CLIENT_ID: driveclon-backend
+      KC_BACKEND_CLIENT_SECRET: ${KC_BACKEND_CLIENT_SECRET:-driveclon-backend-secret}
+      # Secretos de Google: vienen del `.env` (no commiteado). Sin ellos, el job
+      # crea realm + client pero omite el IdP de Google.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+    volumes:
+      - ./keycloak:/keycloak:ro
+    restart: "no"
+
+  # -------------------------------------------------------------------- Backend
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: driveclon-backend
+    command: uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/driveclon
+      ALLOWED_ORIGINS: http://localhost:5173
+      KEYCLOAK_URL: http://keycloak:8080
+      # URL pública (la que el navegador usa y queda como `iss` en los tokens).
+      KEYCLOAK_PUBLIC_URL: http://localhost:8080
+      KEYCLOAK_REALM: driveclon
+      KEYCLOAK_CLIENT_ID: driveclon-ui
+      # Service account para la Admin API (crear orgs). Mismo secreto que el init.
+      KEYCLOAK_ADMIN_CLIENT_ID: driveclon-backend
+      KEYCLOAK_ADMIN_CLIENT_SECRET: ${KC_BACKEND_CLIENT_SECRET:-driveclon-backend-secret}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: driveclon
+      MINIO_SECURE: "false"
+      # Hot-reload: uvicorn usa watchfiles, que respeta esta var.
+      # Polling ON por defecto (necesario en Docker Desktop Win/Mac, donde los
+      # eventos inotify no cruzan la VM). En Linux nativo: USE_POLLING=false.
+      WATCHFILES_FORCE_POLLING: ${USE_POLLING:-true}
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app                            # hot-reload del código (este repo)
+      - /app/.venv                        # no pisar el venv del contenedor
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      # Espera a que exista el client del service account antes de arrancar.
+      keycloak-init:
+        condition: service_completed_successfully
+
+  # ------------------------------------------------------------------- Frontend
+  frontend:
+    build:
+      context: ../drive-clon-ui          # repo hermano (fuera de este repo)
+      dockerfile: Dockerfile.dev
+    container_name: driveclon-frontend
+    command: pnpm run dev -- --host 0.0.0.0 --port 5173
+    environment:
+      # En Vite las vars públicas van con prefijo VITE_
+      VITE_API_URL: http://localhost:8000
+      VITE_KEYCLOAK_URL: http://localhost:8080
+      VITE_KEYCLOAK_REALM: driveclon
+      VITE_KEYCLOAK_CLIENT_ID: driveclon-ui
+      # Hot-reload: chokidar (Vite) respeta esta var. Polling ON por defecto
+      # (necesario en Docker Desktop Win/Mac). En Linux nativo: USE_POLLING=false.
+      CHOKIDAR_USEPOLLING: ${USE_POLLING:-true}
+    ports:
+      - "5173:5173"
+    volumes:
+      - ../drive-clon-ui:/app             # hot-reload del código (repo hermano)
+      - /app/node_modules                 # no pisar node_modules del contenedor
+    depends_on:
+      backend:
+        condition: service_started
+
+volumes:
+  pgdata:
+  miniodata:

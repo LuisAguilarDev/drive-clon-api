@@ -1,0 +1,21 @@
+# Imagen de desarrollo del backend FastAPI (hot-reload vía volumen + uvicorn --reload)
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Dependencias del sistema necesarias para psycopg / bcrypt
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential libpq-dev curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Instalar dependencias primero (mejor uso de la cache de capas)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# El código se monta como volumen en docker-compose; esta copia es para builds standalone
+COPY . .
+
+EXPOSE 8000
+
+# El comando real lo define docker-compose; este es el fallback para `docker run`
+CMD ["uvicorn", "app.main:app", "--reload", "--host", "0.0.0.0", "--port", "8000"]

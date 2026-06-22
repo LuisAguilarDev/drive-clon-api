@@ -8,7 +8,16 @@ WORKDIR /workspace
 COPY requirements.txt .
 
 # Install dependencies from the requirements file
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip && /
+    pip install --no-cache-dir -r requirements.txt && \
+    sudo apt-get update && \
+    sudo apt-get install -y postgresql-client wget && \
+    sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt/ $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list' && \
+    wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add - && \
+    sudo apt-get update && \
+    sudo apt-get install -y postgresql-client-17
+
+
 
 # [Optional] If your requirements rarely change, uncomment this section to add them to the image.
 # COPY requirements.txt /tmp/pip-tmp/
