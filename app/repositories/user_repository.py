@@ -1,38 +1,55 @@
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.models.Users import Users
-from sqlalchemy.future import select
+
 
 class UserRepository:
-    def __init__(self, db: Session):
+    def __init__(self, db: AsyncSession):
         self.db = db
 
-    async def create_user(self, email: str, hashed_password: str):
-        new_user = Users(
-            email=email, password=hashed_password, provider="email")
-        self.db.add(new_user)
-        self.db.commit()
-        self.db.refresh(new_user)
-        return new_user
+    async def find_by_sub(self, keycloak_sub: str) -> Users | None:
+        result = await self.db.execute(
+            select(Users).where(Users.keycloak_sub == keycloak_sub)
+        )
+        return result.scalars().first()
 
-    async def create_user_firebase(self, email: str, name: str, picture: str):
-        new_user = Users(email=email, password="",
-                         provider="google", name=name, picture=picture)
-        self.db.add(new_user)
-        self.db.commit()
-        self.db.refresh(new_user)
-        return new_user
+    async def create(
+        self,
+        keycloak_sub: str,
+        email: str,
+        name: str = "",
+        picture: str = "",
+        org_id: int | None = None,
+    ) -> Users:
+        user = Users(
+            keycloak_sub=keycloak_sub,
+            email=email,
+            name=name or "",
+            picture=picture or "",
+            org_id=org_id,
+        )
+        self.db.add(user)
+        await self.db.commit()
+        await self.db.refresh(user)
+        return user
 
-    async def create_user_firebase(self, email: str, name: str, picture: str):
-        new_user = Users(email=email, password="",
-                         provider="google", name=name, picture=picture)
-        self.db.add(new_user)
-        self.db.commit()
-        self.db.refresh(new_user)
-        return new_user
+    async def set_org(self, user: Users, org_id: int) -> Users:
+        user.org_id = org_id
+        await self.db.commit()
+        await self.db.refresh(user)
+        return user
 
-    # async def findUser(self, email: str):
-    #     stmt = select(Users).where(Users.email == email)
-    #     # async with self.db.begin():  # 👈 Asegúrate de usar async with
-    #     result = await self.db.execute(stmt)
-    #     user = result.scalars().first()  # Obtener el primer resultado o None
-    #     return user
+    async def update_profile(self, user: Users, name: str, picture: str) -> Users:
+        """Sincroniza nombre/avatar desde el token si cambiaron (no pisa con vacío)."""
+        changed = False
+        if name and user.name != name:
+            user.name = name
+            changed = True
+        if picture and user.picture != picture:
+            user.picture = picture
+            changed = True
+        if changed:
+            await self.db.commit()
+            await self.db.refresh(user)
+        return user

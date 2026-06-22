@@ -1,0 +1,110 @@
+// -----------------------------------------------------------------------------
+// Drive Clon — Esquema de base de datos (Postgres)
+//
+// Diagrama entidad-relación en notación DOT (Graphviz). Refleja los modelos de
+// `app/models/` y la migración inicial `979bd579e739_initial_schema`.
+//
+// Render:
+//   dot -Tpng docs/database/schema.dot -o docs/database/schema.png
+//   dot -Tsvg docs/database/schema.dot -o docs/database/schema.svg
+//
+// Leyenda de constraints: PK = primary key, FK = foreign key, U = unique,
+// IX = index, NN = not null, NULL = nullable.
+// Notación crow's-foot: "muchos" (pata de cuervo) → "uno" (tee).
+// -----------------------------------------------------------------------------
+digraph driveclon_db {
+  rankdir=LR;
+  bgcolor="white";
+  graph [fontname="Helvetica", pad="0.4", nodesep="0.6", ranksep="1.4"];
+  node  [shape=plaintext, fontname="Helvetica"];
+  edge  [fontname="Helvetica", fontsize=10, color="#4a5568", dir=both];
+
+  // --------------------------------------------------------------- organizations
+  organizations [label=<
+    <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="5">
+      <TR><TD BGCOLOR="#2b6cb0" COLSPAN="3"><FONT COLOR="white"><B>organizations</B></FONT></TD></TR>
+      <TR>
+        <TD ALIGN="LEFT" PORT="id"><B>id</B></TD>
+        <TD ALIGN="LEFT">integer</TD>
+        <TD ALIGN="LEFT">PK, IX</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT">keycloak_org_id</TD>
+        <TD ALIGN="LEFT">varchar</TD>
+        <TD ALIGN="LEFT">NN, U, IX</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT">name</TD>
+        <TD ALIGN="LEFT">varchar</TD>
+        <TD ALIGN="LEFT">NN</TD>
+      </TR>
+    </TABLE>>];
+
+  // ----------------------------------------------------------------------- users
+  users [label=<
+    <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="5">
+      <TR><TD BGCOLOR="#2f855a" COLSPAN="3"><FONT COLOR="white"><B>users</B></FONT></TD></TR>
+      <TR>
+        <TD ALIGN="LEFT" PORT="id"><B>id</B></TD>
+        <TD ALIGN="LEFT">integer</TD>
+        <TD ALIGN="LEFT">PK, IX</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT">keycloak_sub</TD>
+        <TD ALIGN="LEFT">varchar</TD>
+        <TD ALIGN="LEFT">NN, U, IX</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT">email</TD>
+        <TD ALIGN="LEFT">varchar</TD>
+        <TD ALIGN="LEFT">NN, U</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT">name</TD>
+        <TD ALIGN="LEFT">varchar</TD>
+        <TD ALIGN="LEFT">NULL</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT">picture</TD>
+        <TD ALIGN="LEFT">varchar</TD>
+        <TD ALIGN="LEFT">NULL</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT" PORT="org_id">org_id</TD>
+        <TD ALIGN="LEFT">integer</TD>
+        <TD ALIGN="LEFT">FK, NULL</TD>
+      </TR>
+    </TABLE>>];
+
+  // ----------------------------------------------------------------------- files
+  files [label=<
+    <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="5">
+      <TR><TD BGCOLOR="#b7791f" COLSPAN="3"><FONT COLOR="white"><B>files</B></FONT></TD></TR>
+      <TR>
+        <TD ALIGN="LEFT" PORT="id"><B>id</B></TD>
+        <TD ALIGN="LEFT">integer</TD>
+        <TD ALIGN="LEFT">PK, IX</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT">address</TD>
+        <TD ALIGN="LEFT">varchar</TD>
+        <TD ALIGN="LEFT">NULL, IX</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT" PORT="org_id">org_id</TD>
+        <TD ALIGN="LEFT">integer</TD>
+        <TD ALIGN="LEFT">FK, NULL, IX</TD>
+      </TR>
+    </TABLE>>];
+
+  // ------------------------------------------------------------------- relaciones
+  // Muchos users pertenecen a una organización (org_id nullable).
+  users:org_id -> organizations:id [
+    taillabel="N", headlabel="1",
+    arrowtail=crow, arrowhead=tee, label="org_id"];
+
+  // Muchos files pertenecen a una organización (aislamiento de tenant).
+  files:org_id -> organizations:id [
+    taillabel="N", headlabel="1",
+    arrowtail=crow, arrowhead=tee, label="org_id"];
+}

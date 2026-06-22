@@ -27,6 +27,8 @@ venv.bak/
 # Archivos de configuración y entornos
 *.env
 *.env.*
+# la plantilla SÍ se versiona (no contiene secretos)
+!.env.example
 
 # Log files
 *.log
