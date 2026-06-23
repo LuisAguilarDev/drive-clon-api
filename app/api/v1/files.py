@@ -8,7 +8,7 @@ from typing import Annotated
 from urllib.parse import quote
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +26,7 @@ from app.services.files_service import (
     FolderListing,
     OperationNotAllowed,
     ResourceNotFound,
+    UploadTooLarge,
 )
 
 router = APIRouter(prefix="/files", tags=["files"])
@@ -90,6 +91,24 @@ class CreateFolderRequest(BaseModel):
     parent_id: int = Field(gt=0)
 
 
+class InitUploadRequest(BaseModel):
+    # El cliente envía sólo METADATOS (no el binario); el backend devuelve una URL
+    # prefirmada para subir el fichero directo al almacenamiento.
+    filename: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
+    ]
+    content_type: str | None = None
+    size_bytes: int = Field(ge=0)
+    folder_id: int = Field(gt=0)
+
+
+class InitUploadResponse(BaseModel):
+    # Id de la fila PENDING (para confirmar después) + URL prefirmada de subida.
+    file_id: int
+    upload_url: str
+    method: str = "PUT"
+
+
 class TrashFolderResponse(BaseModel):
     id: int
     name: str
@@ -139,6 +158,17 @@ class ArchiveJobResponse(BaseModel):
 # --- Helpers -------------------------------------------------------------
 def _folder_response(folder) -> "FolderResponse":
     return FolderResponse(id=folder.id, name=folder.name, parent_id=folder.parent_id)
+
+
+def _file_response(file, owner_name: str) -> "FileResponse":
+    return FileResponse(
+        id=file.id,
+        name=file.name,
+        content_type=file.content_type,
+        size_bytes=file.size_bytes,
+        owner=OwnerResponse(id=file.owner_id, name=owner_name, is_me=True),
+        created_at=file.created_at,
+    )
 
 
 def _archive_job_response(view: ArchiveJobView) -> ArchiveJobResponse:
@@ -269,37 +299,47 @@ async def download_file(user: CurrentUser, db: db_dependency, file_id: int):
     return _download_response(download)
 
 
-@router.post("", response_model=FileResponse, status_code=status.HTTP_201_CREATED)
-async def upload_file(
-    user: CurrentUser,
-    db: db_dependency,
-    folder_id: Annotated[int, Form(gt=0)],
-    file: Annotated[UploadFile, File()],
-):
-    """Sube un fichero (multipart) a una carpeta del tenant del llamante."""
-    filename = (file.filename or "").strip()
-    if not filename:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "El fichero necesita un nombre.")
-    data = await file.read()
+@router.post("", response_model=InitUploadResponse, status_code=status.HTTP_201_CREATED)
+async def init_upload(user: CurrentUser, db: db_dependency, body: InitUploadRequest):
+    """Inicia una subida: crea la fila PENDING y devuelve una URL prefirmada.
+
+    El cliente sube el binario DIRECTO al almacenamiento con esa URL (PUT) y luego
+    llama a `POST /files/{file_id}/confirm`. El backend nunca recibe los bytes.
+    """
     service = _build_service(db)
     try:
-        created = await service.upload_file(
+        ticket = await service.init_upload(
             keycloak_sub=user.sub,
-            folder_id=folder_id,
-            filename=filename,
-            content_type=file.content_type,
-            data=data,
+            folder_id=body.folder_id,
+            filename=body.filename,
+            content_type=body.content_type,
+            size_bytes=body.size_bytes,
         )
+    except UploadTooLarge as exc:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, str(exc)
+        ) from exc
     except ResourceNotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
-    return FileResponse(
-        id=created.id,
-        name=created.name,
-        content_type=created.content_type,
-        size_bytes=created.size_bytes,
-        owner=OwnerResponse(id=created.owner_id, name=user.name or "", is_me=True),
-        created_at=created.created_at,
-    )
+    return InitUploadResponse(file_id=ticket.file.id, upload_url=ticket.upload_url)
+
+
+@router.post("/{file_id}/confirm", response_model=FileResponse)
+async def confirm_upload(user: CurrentUser, db: db_dependency, file_id: int):
+    """Confirma una subida prefirmada: verifica el binario en el almacenamiento y
+    activa el fichero (PENDING → ACTIVE) con su tamaño real."""
+    service = _build_service(db)
+    try:
+        created = await service.confirm_upload(user.sub, file_id)
+    except UploadTooLarge as exc:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, str(exc)
+        ) from exc
+    except OperationNotAllowed as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except ResourceNotFound as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    return _file_response(created, user.name or "")
 
 
 # --- Papelera ------------------------------------------------------------

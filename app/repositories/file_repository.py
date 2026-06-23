@@ -6,7 +6,7 @@ permanente sólo marca `status='deleted'` y limpia el binario de MinIO aparte.
 """
 from datetime import datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.Files import Files
@@ -239,7 +239,8 @@ class FileRepository:
             .values(status=ResourceStatus.DELETED, deleted_at=func.now())
         )
 
-    async def create(
+    # --- Subida con URL prefirmada (PENDING → ACTIVE) --------------------
+    async def create_pending(
         self,
         name: str,
         object_key: str,
@@ -249,6 +250,12 @@ class FileRepository:
         org_id: int,
         owner_id: int,
     ) -> Files:
+        """Crea la fila de un fichero en estado PENDING (subida aún sin confirmar).
+
+        No aparece en ninguna vista hasta confirmarse (las consultas filtran por
+        ACTIVE). El `size_bytes` aquí es el DECLARADO por el cliente; al confirmar
+        se sobrescribe con el tamaño real del objeto en el almacenamiento.
+        """
         file = Files(
             name=name,
             object_key=object_key,
@@ -257,6 +264,7 @@ class FileRepository:
             folder_id=folder_id,
             org_id=org_id,
             owner_id=owner_id,
+            status=ResourceStatus.PENDING,
         )
         self.db.add(file)
         # flush (no commit): emite el INSERT y rellena el id/created_at generados
@@ -264,3 +272,54 @@ class FileRepository:
         await self.db.flush()
         await self.db.refresh(file)
         return file
+
+    async def find_pending_by_id(
+        self, file_id: int, owner_id: int, org_id: int
+    ) -> Files | None:
+        """Fichero PENDING por id, acotado al usuario y al tenant (para confirmar)."""
+        result = await self.db.execute(
+            select(Files).where(
+                Files.id == file_id,
+                Files.owner_id == owner_id,
+                Files.org_id == org_id,
+                Files.status == ResourceStatus.PENDING,
+            )
+        )
+        return result.scalars().first()
+
+    async def activate(
+        self, file_id: int, org_id: int, size_bytes: int
+    ) -> None:
+        """Confirma una subida: PENDING → ACTIVE con el tamaño REAL del objeto."""
+        await self.db.execute(
+            update(Files)
+            .where(
+                Files.id == file_id,
+                Files.org_id == org_id,
+                Files.status == ResourceStatus.PENDING,
+            )
+            .values(status=ResourceStatus.ACTIVE, size_bytes=size_bytes)
+        )
+
+    async def list_stale_pending(self, cutoff: datetime) -> list[Files]:
+        """Subidas que quedaron PENDING (nunca confirmadas) antes de `cutoff`,
+        en TODAS las organizaciones. Uso exclusivo del job de limpieza."""
+        result = await self.db.execute(
+            select(Files).where(
+                Files.status == ResourceStatus.PENDING,
+                Files.created_at < cutoff,
+            )
+        )
+        return list(result.scalars().all())
+
+    async def delete_pending(self, file_id: int, org_id: int) -> None:
+        """Borra FÍSICAMENTE una fila PENDING. A diferencia del resto del modelo
+        (las filas se conservan), una subida nunca completada no es contenido real
+        ni dato de analítica, así que se elimina."""
+        await self.db.execute(
+            delete(Files).where(
+                Files.id == file_id,
+                Files.org_id == org_id,
+                Files.status == ResourceStatus.PENDING,
+            )
+        )

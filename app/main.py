@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1 import router as api_v1_router
 from app.api.v1.auth import ORG_PROVISIONED_HEADER
 from app.core.config import settings
+from app.jobs.pending_uploads import purge_stale_pending_uploads
 from app.jobs.trash_purge import purge_expired_trash
 
 
@@ -23,6 +24,14 @@ async def lifespan(app: FastAPI):
         "interval",
         hours=settings.TRASH_PURGE_INTERVAL_HOURS,
         id="trash-purge",
+    )
+    # Limpia subidas que quedaron PENDING (URL prefirmada pedida pero nunca
+    # confirmada): borra el objeto huérfano y la fila.
+    scheduler.add_job(
+        purge_stale_pending_uploads,
+        "interval",
+        hours=settings.TRASH_PURGE_INTERVAL_HOURS,
+        id="pending-uploads-cleanup",
     )
     scheduler.start()
     try:

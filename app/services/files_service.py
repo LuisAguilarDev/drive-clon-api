@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+from app.core.config import settings
 from app.gateways.object_storage_gateway import ObjectStorageGateway
 from app.models.Files import Files
 from app.models.Folders import Folders
@@ -24,6 +25,10 @@ class ResourceNotFound(Exception):
 
 class OperationNotAllowed(Exception):
     """La operación es válida pero no permitida (p. ej. borrar la carpeta raíz)."""
+
+
+class UploadTooLarge(Exception):
+    """El fichero supera el tamaño máximo permitido (`MAX_UPLOAD_SIZE_BYTES`)."""
 
 
 @dataclass
@@ -53,6 +58,15 @@ class FileDownload:
     name: str
     content_type: str | None
     data: bytes
+
+
+@dataclass
+class UploadTicket:
+    """Fila PENDING recién creada + URL prefirmada para que el cliente suba el
+    binario directo al almacenamiento (el backend no toca los bytes)."""
+
+    file: Files
+    upload_url: str
 
 
 @dataclass
@@ -121,31 +135,81 @@ class FilesService:
             parent_id=parent_id,
         )
 
-    async def upload_file(
+    async def init_upload(
         self,
         keycloak_sub: str,
         folder_id: int,
         filename: str,
         content_type: str | None,
-        data: bytes,
-    ) -> Files:
-        """Guarda el binario en MinIO y persiste la fila de metadatos."""
+        size_bytes: int,
+    ) -> UploadTicket:
+        """Inicia una subida: valida tamaño y tenant, crea la fila PENDING y
+        devuelve una URL prefirmada para que el cliente suba el binario DIRECTO al
+        almacenamiento. El backend nunca recibe los bytes."""
+        if size_bytes > settings.MAX_UPLOAD_SIZE_BYTES:
+            raise UploadTooLarge(
+                f"El fichero supera el máximo de "
+                f"{settings.MAX_UPLOAD_SIZE_BYTES} bytes."
+            )
         user = await self._resolve_user(keycloak_sub)
         folder = await self._resolve_folder(user, folder_id)
 
         # Clave única e irrepetible; el uuid evita colisiones por nombre repetido.
         object_key = f"{user.org_id}/{folder.id}/{uuid4()}-{filename}"
-        await self._storage.put_object(object_key, data, content_type)
-
-        return await self._files.create(
+        file = await self._files.create_pending(
             name=filename,
             object_key=object_key,
             content_type=content_type,
-            size_bytes=len(data),
+            size_bytes=size_bytes,
             folder_id=folder.id,
             org_id=user.org_id,
             owner_id=user.id,
         )
+        upload_url = await self._storage.presign_put(
+            object_key, settings.UPLOAD_URL_TTL_SECONDS
+        )
+        return UploadTicket(file=file, upload_url=upload_url)
+
+    async def confirm_upload(self, keycloak_sub: str, file_id: int) -> Files:
+        """Confirma una subida: verifica que el binario llegó al almacenamiento y
+        pasa la fila PENDING → ACTIVE con el tamaño REAL. Si el objeto no existe
+        (subida fallida) o excede el máximo, no se activa."""
+        user = await self._resolve_user(keycloak_sub)
+        file = await self._files.find_pending_by_id(
+            file_id, user.id, user.org_id
+        )
+        if file is None:
+            raise ResourceNotFound("No hay una subida pendiente con ese id.")
+
+        stat = await self._storage.stat(file.object_key)
+        if stat is None:
+            raise OperationNotAllowed("La subida no llegó al almacenamiento.")
+        if stat.size > settings.MAX_UPLOAD_SIZE_BYTES:
+            # El cliente declaró un tamaño válido pero subió algo mayor: se
+            # rechaza y se limpia el objeto para no dejar basura.
+            await self._storage.remove_objects([file.object_key])
+            await self._files.delete_pending(file.id, user.org_id)
+            raise UploadTooLarge(
+                f"El fichero supera el máximo de "
+                f"{settings.MAX_UPLOAD_SIZE_BYTES} bytes."
+            )
+
+        await self._files.activate(file.id, user.org_id, stat.size)
+        file.status = ResourceStatus.ACTIVE
+        file.size_bytes = stat.size
+        return file
+
+    async def purge_stale_pending(self, timeout_hours: int) -> int:
+        """Limpia subidas que quedaron PENDING (nunca confirmadas) más de
+        `timeout_hours`: borra el objeto huérfano (si existe) y la fila. Lo invoca
+        el job programado. Devuelve cuántas se limpiaron."""
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=timeout_hours)
+        purged = 0
+        for file in await self._files.list_stale_pending(cutoff):
+            await self._storage.remove_objects([file.object_key])
+            await self._files.delete_pending(file.id, file.org_id)
+            purged += 1
+        return purged
 
     async def download_file(self, keycloak_sub: str, file_id: int) -> FileDownload:
         """Recupera el binario de un fichero del tenant del llamante."""

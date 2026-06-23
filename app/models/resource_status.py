@@ -8,12 +8,16 @@ class ResourceStatus(str, enum.Enum):
     nunca por una combinación de timestamps. Los timestamps (`trashed_at`,
     `deleted_at`) son metadata para analítica, no para decidir visibilidad.
 
+    - PENDING → subida iniciada: la fila existe y se entregó una URL prefirmada,
+      pero el binario aún no se ha confirmado en MinIO. NO se lista en ninguna
+      vista; al confirmar pasa a ACTIVE. Si nunca se confirma, un job lo limpia.
     - ACTIVE  → visible en "My Drive". El binario existe en MinIO.
     - TRASHED → en la papelera, recuperable. El binario sigue en MinIO.
     - DELETED → borrado permanente: el binario se ha eliminado de MinIO, pero la
       fila se CONSERVA en la BD para analítica (subidas/borrados por mes, etc.).
     """
 
+    PENDING = "pending"
     ACTIVE = "active"
     TRASHED = "trashed"
     DELETED = "deleted"

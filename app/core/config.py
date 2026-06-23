@@ -60,6 +60,17 @@ class Settings(BaseSettings):
     # original a MinIO (ngrok: `--host-header=preserve`) o la firma no validará.
     MINIO_PUBLIC_ENDPOINT: str = ""
 
+    # --- Subida de ficheros (URL prefirmada directa al almacenamiento) ----
+    # Tamaño máximo de subida (bytes). Se valida en el boundary al pedir la URL
+    # prefirmada y se reverifica con el tamaño real del objeto al confirmar.
+    # Por defecto 5 GiB.
+    MAX_UPLOAD_SIZE_BYTES: int = 5 * 1024 * 1024 * 1024
+    # TTL (segundos) de la URL prefirmada de subida (PUT).
+    UPLOAD_URL_TTL_SECONDS: int = 600
+    # Horas tras las que una subida que quedó en 'pending' (nunca confirmada) se
+    # limpia (fila + objeto huérfano), por el job programado.
+    PENDING_UPLOAD_TIMEOUT_HOURS: int = 24
+
     # --- Descarga de carpetas en ZIP (job asíncrono) ----------------------
     # TTL (segundos) de la URL prefirmada de descarga del ZIP ya generado.
     ARCHIVE_URL_TTL_SECONDS: int = 300

@@ -10,17 +10,27 @@ import asyncio
 import io
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import timedelta
 from urllib.parse import quote, urlparse
 
 from minio import Minio
 from minio.deleteobjects import DeleteObject
+from minio.error import S3Error
 
 from app.core.config import settings
 
 # Tamaño de trozo al leer/subir en streaming. 5 MiB es el mínimo de parte que
 # admite el multipart de S3/MinIO (salvo la última), así que sirve para ambos.
 _CHUNK_SIZE = 5 * 1024 * 1024
+
+
+@dataclass
+class ObjectStat:
+    """Metadatos de un objeto en el almacenamiento (existe ⇒ subida completada)."""
+
+    size: int
+    content_type: str | None
 
 
 class ObjectStorageGateway(ABC):
@@ -31,6 +41,19 @@ class ObjectStorageGateway(ABC):
         self, object_key: str, data: bytes, content_type: str | None
     ) -> None:
         """Sube un objeto (bytes) bajo la clave indicada en el bucket privado."""
+
+    @abstractmethod
+    async def presign_put(self, object_key: str, expires_seconds: int) -> str:
+        """URL prefirmada de SUBIDA (PUT) directa del navegador al almacenamiento.
+
+        Se firma con el endpoint PÚBLICO. No fija el Content-Type en la firma (el
+        navegador puede enviar el suyo), así que no hay riesgo de desajuste.
+        """
+
+    @abstractmethod
+    async def stat(self, object_key: str) -> ObjectStat | None:
+        """Metadatos del objeto, o None si no existe. Sirve para confirmar que la
+        subida prefirmada llegó realmente al almacenamiento."""
 
     @abstractmethod
     async def get_object(self, object_key: str) -> bytes:
@@ -146,6 +169,27 @@ class MinioObjectStorageGateway(ObjectStorageGateway):
             file_path,
             content_type or "application/octet-stream",
         )
+
+    async def presign_put(self, object_key: str, expires_seconds: int) -> str:
+        return await asyncio.to_thread(
+            self._public_client.presigned_put_object,
+            self._bucket,
+            object_key,
+            timedelta(seconds=expires_seconds),
+        )
+
+    async def stat(self, object_key: str) -> ObjectStat | None:
+        return await asyncio.to_thread(self._stat_sync, object_key)
+
+    def _stat_sync(self, object_key: str) -> ObjectStat | None:
+        try:
+            info = self._client.stat_object(self._bucket, object_key)
+        except S3Error as exc:
+            # Objeto inexistente ⇒ subida no completada (no es un error fatal).
+            if exc.code in ("NoSuchKey", "NoSuchObject"):
+                return None
+            raise
+        return ObjectStat(size=info.size, content_type=info.content_type)
 
     async def presign_get(
         self, object_key: str, download_name: str, expires_seconds: int

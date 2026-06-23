@@ -125,7 +125,8 @@ A user's **root folder** (`parent_id = NULL`, name `"My Drive"`) is provisioned 
 - `GET /files/root` — caller's root folder.
 - `GET /files?folder_id=<id>` — subfolders + files of a folder (root if omitted).
 - `POST /files/folders` — create a folder (`{ name, parent_id }`).
-- `POST /files` — multipart upload (`file`, `folder_id`) → stored in MinIO, row in Postgres.
+- `POST /files` — **start a presigned upload**: send metadata only (`filename`, `content_type`, `size_bytes`, `folder_id`); returns `{ file_id, upload_url }`. The client `PUT`s the bytes straight to object storage (the backend never receives them), then calls confirm. Enforces `MAX_UPLOAD_SIZE_BYTES`.
+- `POST /files/{file_id}/confirm` — finish a presigned upload: backend `stat`s the object (verifies it exists + real size), flips the row `pending → active`, returns the `FileResponse`.
 - `GET /files/{file_id}/download` — stream a single file's bytes (Content-Disposition attachment).
 - `POST /files/folders/{folder_id}/archive` — **enqueue** a ZIP of the folder + subtree. Returns `202 { job_id, status }` immediately; the ZIP is built asynchronously by the `worker` service (see "Folder ZIP" below).
 - `GET /files/archives/{job_id}` — poll a ZIP job. When `status='ready'` the response carries a short-TTL **presigned download URL** (the browser pulls the ZIP straight from object storage; bandwidth never touches the backend).
@@ -168,6 +169,11 @@ Full walkthrough + flow diagram: [`docs/3_files_flow/`](docs/3_files_flow/README
 Files and folders carry a single **`status`** column (Postgres native enum `resource_status`)
 that is the **only discriminator queries filter on** — never a combination of timestamps:
 
+- `pending` → **files only**: a presigned upload was started (row + `upload_url` handed out) but
+  the object isn't confirmed in storage yet. Invisible in every view (queries filter `active`);
+  becomes `active` on confirm. Never-confirmed rows are swept by the `pending-uploads-cleanup` job
+  (`PENDING_UPLOAD_TIMEOUT_HOURS`) — the **only** rows in the system that are *physically deleted*
+  (an abandoned upload is not real content or analytics).
 - `active` → visible in My Drive; object exists in MinIO.
 - `trashed` → in the trash, recoverable; object still in MinIO.
 - `deleted` → permanently purged: the **MinIO object is removed but the DB row is kept** (for
