@@ -51,6 +51,15 @@ class EnsureOrganizationService:
     ) -> EnsureOrganizationResult:
         user = await self._users.find_by_sub(keycloak_sub)
 
+        # Keycloak (H2 en memoria en dev) puede resetearse y emitir un `sub` nuevo
+        # para el mismo usuario. El email (verificado por Google) es la identidad
+        # estable: si ya existe un usuario con ese email, revinculamos su `sub` en
+        # lugar de intentar crear un duplicado (que violaría `users_email_key`).
+        if user is None:
+            existing = await self._users.find_by_email(email)
+            if existing is not None:
+                user = await self._users.relink_sub(existing, keycloak_sub)
+
         if user and user.org_id is not None:
             organization = await self._organizations.find_by_id(user.org_id)
             if organization is not None:

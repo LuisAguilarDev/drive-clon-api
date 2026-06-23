@@ -77,12 +77,15 @@ services:
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
     ports:
       - "8080:8080"
-    # POC: start-dev usa H2 en memoria (no persiste entre recreaciones).
+    volumes:
+      # Persiste la BD H2 de dev (en /opt/keycloak/data/h2) entre recreaciones,
+      # para que el `sub` de los usuarios federados NO cambie en cada rebuild.
+      - kcdata:/opt/keycloak/data
 
   # Job de un solo uso: crea el realm `driveclon`, el client `driveclon-ui` y el
   # IdP de Google (si hay credenciales), luego termina. Idempotente: se re-aplica
-  # en cada recreación de Keycloak (H2 en memoria no persiste). Mismo patrón que
-  # `minio-init`.
+  # en cada arranque (con la H2 ya persistida, los objetos existentes se omiten).
+  # Mismo patrón que `minio-init`.
   keycloak-init:
     image: quay.io/keycloak/keycloak:26.0
     container_name: driveclon-keycloak-init
@@ -107,6 +110,26 @@ services:
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
     volumes:
       - ./keycloak:/keycloak:ro
+    restart: "no"
+
+  # ------------------------------------------------------------------ Migrate
+  # Job de un solo uso: aplica las migraciones de Alembic y termina. Mantiene el
+  # esquema FUERA del proceso del servidor (no ralentiza el arranque ni provoca
+  # carreras entre réplicas). Mismo patrón que minio-init/keycloak-init.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: driveclon-migrate
+    command: alembic upgrade head
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/driveclon
+    volumes:
+      - .:/app
+      - /app/.venv
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: "no"
 
   # -------------------------------------------------------------------- Backend
@@ -142,6 +165,9 @@ services:
       - .:/app                            # hot-reload del código (este repo)
       - /app/.venv                        # no pisar el venv del contenedor
     depends_on:
+      # El esquema debe estar migrado antes de servir peticiones.
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       minio:
@@ -180,3 +206,4 @@ services:
 volumes:
   pgdata:
   miniodata:
+  kcdata:

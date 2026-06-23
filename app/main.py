@@ -5,7 +5,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.db.database import run_migrations
 from app.jobs.trash_purge import purge_expired_trash
 from app.routes import auth, files
 from app.routes.auth import ORG_PROVISIONED_HEADER
@@ -13,8 +12,9 @@ from app.routes.auth import ORG_PROVISIONED_HEADER
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Aplica las migraciones de Alembic antes de servir peticiones.
-    await run_migrations()
+    # Las migraciones NO se aplican aquí: corren fuera del proceso del servidor
+    # (servicio `migrate` en docker-compose, o `alembic upgrade head` a mano).
+    # Acoplarlas al arranque ralentiza el boot y provoca carreras con réplicas.
 
     # Job periódico que borra definitivamente lo caducado de la papelera.
     scheduler = AsyncIOScheduler(timezone="UTC")

@@ -17,6 +17,27 @@ class UserRepository:
         )
         return result.scalars().first()
 
+    async def find_by_email(self, email: str) -> Users | None:
+        result = await self.db.execute(
+            select(Users).where(
+                Users.email == email,
+                Users.deleted_at.is_(None),
+            )
+        )
+        return result.scalars().first()
+
+    async def relink_sub(self, user: Users, keycloak_sub: str) -> Users:
+        """Revincula un usuario existente a un nuevo `keycloak_sub`.
+
+        Keycloak (H2 en memoria en dev) puede resetearse y emitir un `sub` nuevo
+        para la misma persona. El email (verificado por Google) es la identidad
+        estable, así que actualizamos el `sub` en vez de duplicar el usuario.
+        """
+        user.keycloak_sub = keycloak_sub
+        await self.db.commit()
+        await self.db.refresh(user)
+        return user
+
     async def create(
         self,
         keycloak_sub: str,

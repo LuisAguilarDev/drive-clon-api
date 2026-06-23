@@ -37,8 +37,10 @@ There is **no test suite** and no linter configured in this repo yet.
 ### Migrations (Alembic)
 
 Alembic is the **single source of truth** for the DB schema (models are not auto-created).
-Migrations are applied **automatically on app startup** (`run_migrations()` in the FastAPI
-lifespan) and can also be run manually with the `alembic upgrade head` command above.
+Migrations run **outside the app process** — never in the FastAPI lifespan (that would slow boot
+and race across replicas). On `docker compose up`, the one-shot **`migrate`** service runs
+`alembic upgrade head` and exits; `backend` waits for it via `service_completed_successfully`. In
+development you can also apply them by hand with the `alembic upgrade head` command above.
 
 ```bash
 docker compose exec backend alembic revision --autogenerate -m "describe change"
