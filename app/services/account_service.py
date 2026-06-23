@@ -59,14 +59,28 @@ class AccountService:
             # 2. Marca ficheros y carpetas como purgados (filas conservadas).
             await self._files.mark_purged_in_org(org_id)
             await self._folders.mark_purged_in_org(org_id)
-            # 3. Marca la organización como borrada.
+            # 3. Borra la org de Keycloak (best-effort) ANTES de marcar el mirror:
+            #    Keycloak exige nombre de org único, así que una org huérfana
+            #    bloquearía con 409 un alta futura del mismo usuario.
+            organization = await self._organizations.find_by_id(org_id)
+            if organization is not None:
+                await self._cleanup_keycloak_org(organization.keycloak_org_id)
+            # 4. Marca la organización (mirror local) como borrada.
             await self._organizations.soft_delete(org_id)
 
-        # 4. Anonimiza la PII del usuario y lo marca como borrado (fila conservada).
+        # 5. Anonimiza la PII del usuario y lo marca como borrado (fila conservada).
         await self._users.anonymize(user)
 
-        # 5. Best-effort: elimina la identidad (PII) del usuario en Keycloak.
+        # 6. Best-effort: elimina la identidad (PII) del usuario en Keycloak.
         await self._cleanup_keycloak_user(keycloak_sub)
+
+    async def _cleanup_keycloak_org(self, keycloak_org_id: str) -> None:
+        try:
+            await self._keycloak_admin.delete_organization(keycloak_org_id)
+        except Exception:
+            logger.warning(
+                "No se pudo borrar la organización en Keycloak.", exc_info=True
+            )
 
     async def _cleanup_keycloak_user(self, keycloak_sub: str) -> None:
         try:

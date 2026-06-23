@@ -74,12 +74,19 @@ class EnsureOrganizationService:
         alias = f"user-{keycloak_sub}"
         domain = f"{keycloak_sub}.{_ORG_DOMAIN_SUFFIX}"
 
+        # Keycloak exige que el NOMBRE de la organización sea único en el realm.
+        # Como el display_name no lo es (dos personas pueden compartir nombre, o
+        # una misma persona con varias cuentas de Google), le añadimos el `sub`
+        # (único) para garantizar unicidad. El nombre "bonito" se guarda en el
+        # mirror de Postgres, que es el que ve la app.
+        keycloak_org_name = f"{display_name} ({keycloak_sub})"
+
         keycloak_org_id = await self._keycloak_admin.create_organization(
-            name=display_name, alias=alias, domain=domain
+            name=keycloak_org_name, alias=alias, domain=domain
         )
         await self._keycloak_admin.add_member(keycloak_org_id, keycloak_sub)
 
-        # Espejar en Postgres y vincular al usuario.
+        # Espejar en Postgres y vincular al usuario (con el nombre legible).
         organization = await self._organizations.create(
             keycloak_org_id=keycloak_org_id, name=display_name
         )

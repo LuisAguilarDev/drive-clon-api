@@ -27,6 +27,12 @@ class KeycloakAdminGateway(ABC):
         """Añade un usuario (por su `sub`) como miembro de la organización."""
 
     @abstractmethod
+    async def delete_organization(self, organization_id: str) -> None:
+        """Borra una organización de Keycloak. Tolera que ya no exista
+        (idempotente). Necesario al cerrar la cuenta: Keycloak exige nombre de
+        organización único, así que una org huérfana bloquearía un alta futura."""
+
+    @abstractmethod
     async def delete_user(self, user_id: str) -> None:
         """Borra un usuario (por su `sub`) de Keycloak para eliminar su PII.
         Tolera que ya no exista (idempotente)."""
@@ -98,6 +104,17 @@ class HttpKeycloakAdminGateway(KeycloakAdminGateway):
                 content=json.dumps(user_id),
             )
         response.raise_for_status()
+
+    async def delete_organization(self, organization_id: str) -> None:
+        headers = await self._headers()
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.delete(
+                f"{settings.admin_base_url}/organizations/{organization_id}",
+                headers=headers,
+            )
+        # 404 = ya no existe: para una eliminación es éxito (idempotente).
+        if response.status_code != 404:
+            response.raise_for_status()
 
     async def delete_user(self, user_id: str) -> None:
         headers = await self._headers()
