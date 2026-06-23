@@ -5,8 +5,6 @@ Orquesta repositorios y el gateway de almacenamiento. Toda operación se acota a
 token), nunca desde el claim del token. Carpetas/ficheros ajenos al tenant se
 tratan como inexistentes (`ResourceNotFound` ⇒ 404), sin filtrar existencia.
 """
-import io
-import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -158,25 +156,6 @@ class FilesService:
         data = await self._storage.get_object(file.object_key)
         return FileDownload(
             name=file.name, content_type=file.content_type, data=data
-        )
-
-    async def download_folder(
-        self, keycloak_sub: str, folder_id: int | None
-    ) -> FileDownload:
-        """Empaqueta en un ZIP todos los ficheros de la carpeta y sus subcarpetas."""
-        user = await self._resolve_user(keycloak_sub)
-        folder = await self._resolve_folder(user, folder_id)
-
-        entries = await self._collect_files(folder, user.org_id, prefix="")
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-            for arcname, object_key in entries:
-                archive.writestr(arcname, await self._storage.get_object(object_key))
-
-        return FileDownload(
-            name=f"{folder.name}.zip",
-            content_type="application/zip",
-            data=buffer.getvalue(),
         )
 
     async def delete_file(self, keycloak_sub: str, file_id: int) -> None:
@@ -339,24 +318,6 @@ class FilesService:
         for subfolder in await self._folders.list_children(folder.id, org_id):
             ids.extend(await self._collect_subtree_ids(subfolder, org_id))
         return ids
-
-    async def _collect_files(
-        self, folder: Folders, org_id: int, prefix: str
-    ) -> list[tuple[str, str]]:
-        """Lista recursiva de `(ruta_relativa, object_key)` bajo una carpeta."""
-        entries: list[tuple[str, str]] = [
-            (f"{prefix}{file.name}", file.object_key)
-            for file, _owner_name in await self._files.list_by_folder(
-                folder.id, org_id
-            )
-        ]
-        for subfolder in await self._folders.list_children(folder.id, org_id):
-            entries.extend(
-                await self._collect_files(
-                    subfolder, org_id, f"{prefix}{subfolder.name}/"
-                )
-            )
-        return entries
 
     async def _resolve_user(self, keycloak_sub: str):
         user = await self._users.find_by_sub(keycloak_sub)

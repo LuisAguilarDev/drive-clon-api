@@ -1,0 +1,61 @@
+// -----------------------------------------------------------------------------
+// Drive Clon — Flujo de ficheros (énfasis en la descarga de carpeta en ZIP)
+//
+// Diagrama de FLUJO (no entidad-relación) en notación DOT (Graphviz). Muestra el
+// patrón petición / worker de la descarga asíncrona de una carpeta en ZIP:
+// la petición encola un job y responde al instante; un worker aparte arma el ZIP
+// y el navegador lo descarga DIRECTO del almacenamiento por URL prefirmada.
+//
+// Render:
+//   dot -Tpng docs/3_files_flow/graph.gv -o docs/3_files_flow/graph.png
+//   dot -Tsvg docs/3_files_flow/graph.gv -o docs/3_files_flow/graph.svg
+//
+// Colores (mismos que el diagrama de BD): navegador gris, API azul, Postgres
+// verde, worker morado, almacenamiento dorado. Línea discontinua = asíncrono.
+// -----------------------------------------------------------------------------
+digraph files_archive_flow {
+  rankdir=TB;
+  bgcolor="white";
+  graph [fontname="Helvetica", labelloc="t", fontsize=16,
+         label="Descarga de carpeta en ZIP — flujo petición / worker (Option B)",
+         pad="0.4", nodesep="0.5", ranksep="0.7"];
+  node  [fontname="Helvetica", fontsize=11];
+  edge  [fontname="Helvetica", fontsize=10, color="#4a5568"];
+
+  // ---------------------------------------------------------------- componentes
+  node [shape=box, style="rounded,filled", fontcolor="white"];
+  browser [label="Navegador (SPA)\ndrive-clon-ui", fillcolor="#4a5568"];
+  api     [label="Backend API\n(FastAPI · ArchiveService)", fillcolor="#2b6cb0"];
+  db      [label="Postgres\ntabla download_jobs\n(cola + registro durable)", fillcolor="#2f855a"];
+  worker  [label="Worker\napp/jobs/archive_worker.py", fillcolor="#6b46c1"];
+  storage [label="Object Storage\nMinIO (local) / S3 (prod)", fillcolor="#b7791f"];
+
+  // notas (cajas planas)
+  node [shape=note, style="filled", fillcolor="#fefcbf", fontcolor="#000000", fontsize=9];
+  reaper   [label="Reaper (en cada ciclo):\nprocessing atascado > timeout\n→ vuelve a 'queued'"];
+  lifecycle[label="Regla de ciclo de vida del bucket:\nprefijo _archives/ caduca en 1 día\n(limpieza nativa, sin job)"];
+
+  // ----------------------------------------------------- 1) petición (síncrono)
+  browser -> api [label="1. POST /files/folders/{id}/archive"];
+  api -> db      [label="2. INSERT download_jobs (queued)\n+ NOTIFY download_jobs_new"];
+  api -> browser [label="3. 202 { job_id, status: queued }", constraint=false, color="#2b6cb0"];
+
+  // ------------------------------------------------------- 4-7) worker (async)
+  db -> worker      [label="4. despierta por NOTIFY (o sondeo)\nclaim_next: FOR UPDATE SKIP LOCKED\n→ status = processing", style=dashed, color="#6b46c1"];
+  storage -> worker [label="5. open_object_stream\n(lee cada fichero por trozos)", style=dashed, color="#6b46c1"];
+  worker -> worker  [label="arma el ZIP en disco temporal\n(memoria acotada)", style=dashed, color="#6b46c1"];
+  worker -> storage [label="6. upload_file multipart →\n_archives/{org_id}/{job_id}.zip", style=dashed, color="#6b46c1"];
+  worker -> db      [label="7. mark_ready (object_key, size)", style=dashed, color="#6b46c1"];
+
+  // -------------------------------------------- 8-12) poll + descarga directa
+  browser -> api [label="8. GET /files/archives/{job_id}  (poll)"];
+  api -> db      [label="9. find_by_id (acotado a org_id)"];
+  api -> storage [label="10. presign_get\n(cliente público / endpoint del navegador)"];
+  api -> browser [label="11. { status: ready, download_url }", constraint=false, color="#2b6cb0"];
+  browser -> storage [label="12. GET URL prefirmada\n(descarga DIRECTA; no pasa por el backend)",
+                      color="#b7791f", penwidth=2];
+
+  // ------------------------------------------------------------------- notas
+  reaper -> db        [style=dotted, arrowhead=none, color="#a0aec0", constraint=false];
+  lifecycle -> storage[style=dotted, arrowhead=none, color="#a0aec0", constraint=false];
+}

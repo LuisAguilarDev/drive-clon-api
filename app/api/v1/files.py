@@ -6,6 +6,7 @@ llamante (multi-tenant). Las DTOs viven aquí; la lógica, en `FilesService`.
 from datetime import datetime
 from typing import Annotated
 from urllib.parse import quote
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from pydantic import BaseModel, Field, StringConstraints
@@ -14,9 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import CurrentUser
 from app.db.database import get_db
 from app.gateways.object_storage_gateway import object_storage_gateway
+from app.repositories.download_job_repository import DownloadJobRepository
 from app.repositories.file_repository import FileRepository
 from app.repositories.folder_repository import FolderRepository
 from app.repositories.user_repository import UserRepository
+from app.services.archive_service import ArchiveJobView, ArchiveService
 from app.services.files_service import (
     FileDownload,
     FilesService,
@@ -35,6 +38,16 @@ def _build_service(db: AsyncSession) -> FilesService:
         user_repository=UserRepository(db),
         folder_repository=FolderRepository(db),
         file_repository=FileRepository(db),
+        storage=object_storage_gateway,
+    )
+
+
+def _build_archive_service(db: AsyncSession) -> ArchiveService:
+    return ArchiveService(
+        user_repository=UserRepository(db),
+        folder_repository=FolderRepository(db),
+        file_repository=FileRepository(db),
+        download_job_repository=DownloadJobRepository(db),
         storage=object_storage_gateway,
     )
 
@@ -111,9 +124,32 @@ class RestoreFolderResponse(BaseModel):
     parent_id: int
 
 
+class ArchiveJobResponse(BaseModel):
+    """Estado de un job de empaquetado en ZIP. `download_url` sólo llega cuando
+    el ZIP está listo (status='ready'); `error` sólo cuando falló."""
+
+    job_id: UUID
+    status: str
+    name: str
+    size_bytes: int | None = None
+    download_url: str | None = None
+    error: str | None = None
+
+
 # --- Helpers -------------------------------------------------------------
 def _folder_response(folder) -> "FolderResponse":
     return FolderResponse(id=folder.id, name=folder.name, parent_id=folder.parent_id)
+
+
+def _archive_job_response(view: ArchiveJobView) -> ArchiveJobResponse:
+    return ArchiveJobResponse(
+        job_id=view.id,
+        status=view.status.value,
+        name=view.name,
+        size_bytes=view.size_bytes,
+        download_url=view.download_url,
+        error=view.error,
+    )
 
 
 def _download_response(download: FileDownload) -> Response:
@@ -188,15 +224,38 @@ async def create_folder(
     return _folder_response(folder)
 
 
-@router.get("/folders/{folder_id}/download")
-async def download_folder(user: CurrentUser, db: db_dependency, folder_id: int):
-    """Descarga una carpeta (y sus subcarpetas) como un ZIP con todos sus ficheros."""
-    service = _build_service(db)
+@router.post(
+    "/folders/{folder_id}/archive",
+    response_model=ArchiveJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def request_folder_archive(
+    user: CurrentUser, db: db_dependency, folder_id: int
+):
+    """Encola el empaquetado de una carpeta (y subcarpetas) en ZIP.
+
+    Responde al instante (202) con el id del job; el ZIP lo arma un worker aparte.
+    El cliente consulta el estado en `GET /files/archives/{job_id}` y, cuando esté
+    listo, recibe una URL prefirmada de descarga directa desde el almacenamiento.
+    """
+    service = _build_archive_service(db)
     try:
-        download = await service.download_folder(user.sub, folder_id)
+        job = await service.request_archive(user.sub, folder_id)
     except ResourceNotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
-    return _download_response(download)
+    return ArchiveJobResponse(job_id=job.id, status=job.status.value, name=job.name)
+
+
+@router.get("/archives/{job_id}", response_model=ArchiveJobResponse)
+async def get_folder_archive(user: CurrentUser, db: db_dependency, job_id: UUID):
+    """Estado de un job de empaquetado. Cuando `status='ready'`, incluye
+    `download_url` (URL prefirmada de corta duración para descargar el ZIP)."""
+    service = _build_archive_service(db)
+    try:
+        view = await service.get_job(user.sub, job_id)
+    except ResourceNotFound as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    return _archive_job_response(view)
 
 
 @router.get("/{file_id}/download")

@@ -1,16 +1,26 @@
 """Gateway hacia el almacenamiento de objetos (MinIO, S3-compatible).
 
-Abstrae la subida del binario. El resto del código depende de la interfaz
-`ObjectStorageGateway`, no de la implementación concreta de MinIO.
+Abstrae el almacenamiento binario. El resto del código depende de la interfaz
+`ObjectStorageGateway`, no de la implementación concreta de MinIO. Como MinIO
+habla el protocolo de S3, migrar a S3 real es cambiar configuración (endpoint y
+credenciales), no código: las URLs prefirmadas, el multipart y el ciclo de vida
+del bucket son API estándar de S3.
 """
 import asyncio
 import io
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from datetime import timedelta
+from urllib.parse import quote, urlparse
 
 from minio import Minio
 from minio.deleteobjects import DeleteObject
 
 from app.core.config import settings
+
+# Tamaño de trozo al leer/subir en streaming. 5 MiB es el mínimo de parte que
+# admite el multipart de S3/MinIO (salvo la última), así que sirve para ambos.
+_CHUNK_SIZE = 5 * 1024 * 1024
 
 
 class ObjectStorageGateway(ABC):
@@ -30,6 +40,30 @@ class ObjectStorageGateway(ABC):
     async def remove_objects(self, object_keys: list[str]) -> None:
         """Borra DEFINITIVAMENTE del bucket los objetos indicados (idempotente)."""
 
+    @abstractmethod
+    def open_object_stream(self, object_key: str) -> Iterator[bytes]:
+        """Lee un objeto en streaming (trozos), sin cargarlo entero en memoria.
+
+        SÍNCRONO a propósito: se consume dentro de un hilo de trabajo (el armado
+        del ZIP es código bloqueante) para no acoplar el bucle de eventos.
+        """
+
+    @abstractmethod
+    async def upload_file(
+        self, object_key: str, file_path: str, content_type: str | None
+    ) -> None:
+        """Sube un fichero LOCAL al bucket (multipart automático, memoria acotada)."""
+
+    @abstractmethod
+    async def presign_get(
+        self, object_key: str, download_name: str, expires_seconds: int
+    ) -> str:
+        """URL prefirmada de descarga (GET) válida un tiempo limitado.
+
+        Se firma con el endpoint PÚBLICO para que el navegador pueda abrirla; el
+        nombre de descarga viaja en `response-content-disposition`.
+        """
+
 
 class MinioObjectStorageGateway(ObjectStorageGateway):
     """Implementación contra MinIO usando su SDK oficial (cliente síncrono)."""
@@ -42,6 +76,28 @@ class MinioObjectStorageGateway(ObjectStorageGateway):
             secure=settings.MINIO_SECURE,
         )
         self._bucket = settings.MINIO_BUCKET
+        # Cliente SOLO para firmar URLs públicas: apunta al endpoint que ve el
+        # navegador (túnel/ngrok en local, la URL real del bucket en prod). Si no
+        # hay endpoint público configurado, se reutiliza el interno.
+        self._public_client = self._build_public_client()
+
+    def _build_public_client(self) -> Minio:
+        raw = settings.MINIO_PUBLIC_ENDPOINT.strip()
+        if not raw:
+            return self._client
+        if "://" in raw:
+            parsed = urlparse(raw)
+            endpoint = parsed.netloc
+            secure = parsed.scheme == "https"
+        else:
+            endpoint = raw
+            secure = settings.MINIO_SECURE
+        return Minio(
+            endpoint,
+            access_key=settings.MINIO_ACCESS_KEY,
+            secret_key=settings.MINIO_SECRET_KEY,
+            secure=secure,
+        )
 
     async def put_object(
         self, object_key: str, data: bytes, content_type: str | None
@@ -69,6 +125,50 @@ class MinioObjectStorageGateway(ObjectStorageGateway):
             # El SDK exige cerrar y liberar la conexión al pool tras leer.
             response.close()
             response.release_conn()
+
+    def open_object_stream(self, object_key: str) -> Iterator[bytes]:
+        response = self._client.get_object(self._bucket, object_key)
+        try:
+            yield from response.stream(_CHUNK_SIZE)
+        finally:
+            response.close()
+            response.release_conn()
+
+    async def upload_file(
+        self, object_key: str, file_path: str, content_type: str | None
+    ) -> None:
+        # `fput_object` trocea el fichero en partes y hace multipart si hace
+        # falta: la memoria no crece con el tamaño del fichero.
+        await asyncio.to_thread(
+            self._client.fput_object,
+            self._bucket,
+            object_key,
+            file_path,
+            content_type or "application/octet-stream",
+        )
+
+    async def presign_get(
+        self, object_key: str, download_name: str, expires_seconds: int
+    ) -> str:
+        return await asyncio.to_thread(
+            self._presign_get_sync, object_key, download_name, expires_seconds
+        )
+
+    def _presign_get_sync(
+        self, object_key: str, download_name: str, expires_seconds: int
+    ) -> str:
+        # Fuerza nombre y tipo en la respuesta del objeto (RFC 5987 para el
+        # nombre), así el navegador descarga "<carpeta>.zip" como adjunto.
+        disposition = f"attachment; filename*=UTF-8''{quote(download_name)}"
+        return self._public_client.presigned_get_object(
+            self._bucket,
+            object_key,
+            expires=timedelta(seconds=expires_seconds),
+            response_headers={
+                "response-content-disposition": disposition,
+                "response-content-type": "application/zip",
+            },
+        )
 
     async def remove_objects(self, object_keys: list[str]) -> None:
         # El SDK síncrono se descarga a un hilo para no bloquear el event loop.

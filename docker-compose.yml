@@ -53,7 +53,8 @@ services:
       timeout: 5s
       retries: 10
 
-  # Job de un solo uso: crea el bucket "driveclon" y termina.
+  # Job de un solo uso: crea el bucket "driveclon", configura la regla de ciclo
+  # de vida que caduca los ZIP temporales bajo `_archives/`, y termina.
   minio-init:
     image: quay.io/minio/mc
     container_name: driveclon-minio-init
@@ -64,7 +65,8 @@ services:
       /bin/sh -c "
       mc alias set local http://minio:9000 minioadmin minioadmin &&
       mc mb --ignore-existing local/driveclon &&
-      echo 'Bucket driveclon listo';
+      mc ilm rule add --expire-days 1 --prefix '_archives/' local/driveclon || true &&
+      echo 'Bucket driveclon listo (ZIP temporales caducan en 1 día)';
       "
 
   # ------------------------------------------------------------------- Keycloak
@@ -155,6 +157,10 @@ services:
       MINIO_SECRET_KEY: minioadmin
       MINIO_BUCKET: driveclon
       MINIO_SECURE: "false"
+      # Endpoint público con el que se firman las URLs prefirmadas que abre el
+      # navegador (túnel ngrok al puerto 9000). Vacío por defecto: el ZIP sólo
+      # será descargable si defines aquí la URL del túnel (ver README §ngrok).
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-}
       # Hot-reload: uvicorn usa watchfiles, que respeta esta var.
       # Polling ON por defecto (necesario en Docker Desktop Win/Mac, donde los
       # eventos inotify no cruzan la VM). En Linux nativo: USE_POLLING=false.
@@ -177,6 +183,34 @@ services:
       # Espera a que exista el client del service account antes de arrancar.
       keycloak-init:
         condition: service_completed_successfully
+
+  # --------------------------------------------------------------------- Worker
+  # Procesa la cola de empaquetado en ZIP (tabla `download_jobs`). Proceso aparte
+  # del API, escalable por separado (`docker compose up --scale worker=N`): la
+  # reclamación con FOR UPDATE SKIP LOCKED garantiza que N réplicas no se pisen.
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: driveclon-worker
+    command: python -m app.jobs.archive_worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/driveclon
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: driveclon
+      MINIO_SECURE: "false"
+    volumes:
+      - .:/app                            # hot-reload del código (este repo)
+      - /app/.venv                        # no pisar el venv del contenedor
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
 
   # ------------------------------------------------------------------- Frontend
   frontend:

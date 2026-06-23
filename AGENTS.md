@@ -20,8 +20,10 @@ by relative path — both repos must be cloned as sibling folders under the same
 All local development runs in Docker. Run `docker compose` from this repo's root.
 
 ```bash
-docker compose up -d                          # build + start all 5 services (Postgres, MinIO, Keycloak, backend, frontend)
+docker compose up -d                          # build + start all services (Postgres, MinIO, Keycloak, backend, worker, frontend)
 docker compose logs -f backend                # follow backend logs
+docker compose logs -f worker                 # follow ZIP-archive worker logs
+docker compose up -d --scale worker=3         # run 3 ZIP workers (SKIP LOCKED keeps them from colliding)
 docker compose down                           # stop (keeps data)
 docker compose down -v                        # stop and DELETE volumes (postgres + minio)
 docker compose exec backend alembic upgrade head   # apply migrations manually
@@ -73,6 +75,7 @@ repositories/  Data access over SQLAlchemy async sessions. One class per aggrega
 models/        SQLAlchemy ORM models (declarative Base from app/db/database.py).
 core/          config.py (pydantic-settings) and security.py (JWT/JWKS validation).
 db/            Async engine, session factory, and Alembic migration runner.
+jobs/          Out-of-request workers (run their own SessionLocal + own the commit): `trash_purge` (APScheduler, in the backend lifespan) and `archive_worker` (standalone process, its own docker-compose `worker` service).
 ```
 
 Dependencies are injected by constructor (e.g. `EnsureOrganizationService` takes its
@@ -124,9 +127,41 @@ A user's **root folder** (`parent_id = NULL`, name `"My Drive"`) is provisioned 
 - `POST /files/folders` — create a folder (`{ name, parent_id }`).
 - `POST /files` — multipart upload (`file`, `folder_id`) → stored in MinIO, row in Postgres.
 - `GET /files/{file_id}/download` — stream a single file's bytes (Content-Disposition attachment).
-- `GET /files/folders/{folder_id}/download` — stream a ZIP of all files in the folder and its subfolders (built in memory, paths preserved).
+- `POST /files/folders/{folder_id}/archive` — **enqueue** a ZIP of the folder + subtree. Returns `202 { job_id, status }` immediately; the ZIP is built asynchronously by the `worker` service (see "Folder ZIP" below).
+- `GET /files/archives/{job_id}` — poll a ZIP job. When `status='ready'` the response carries a short-TTL **presigned download URL** (the browser pulls the ZIP straight from object storage; bandwidth never touches the backend).
 - `DELETE /files/{file_id}` — soft-delete a single file → moves it to the trash (204). The MinIO object is kept.
 - `DELETE /files/folders/{folder_id}` — soft-delete a folder and its whole subtree (subfolders + files) recursively (204). The root folder cannot be deleted (400).
+
+#### Folder ZIP (async archive — request/worker split)
+
+Folder downloads are **not** built in the request. `POST /files/folders/{folder_id}/archive`
+inserts a row in **`download_jobs`** (status `queued`) and returns `202` instantly. The
+standalone **`worker`** service (`app/jobs/archive_worker.py` → `ArchiveService.build`) builds
+the ZIP and the client polls `GET /files/archives/{job_id}` until `ready`.
+
+- **`download_jobs` is the queue *and* the durable record** — no Redis/broker. The worker claims
+  the next job with `UPDATE … WHERE id = (SELECT id … WHERE status='queued' ORDER BY created_at
+  FOR UPDATE SKIP LOCKED LIMIT 1)`, so N worker replicas never grab the same job. The partial
+  index `ix_download_jobs_queued` (`WHERE status='queued'`) keeps that claim cheap as finished
+  rows pile up. Wakeups are instant via `LISTEN/NOTIFY` (channel `download_jobs_new`, emitted on
+  insert), with polling (`ARCHIVE_POLL_INTERVAL_SECONDS`) as a fallback heartbeat.
+- **Crash recovery:** the claim commits `processing` + `locked_at` *before* the heavy build (so
+  the row lock isn't held during zipping). A job stuck in `processing` longer than
+  `ARCHIVE_STALE_TIMEOUT_MINUTES` is returned to `queued` by the worker's reaper (visibility
+  timeout). Status enum lives in `app/models/download_job_status.py` (`queued`/`processing`/
+  `ready`/`failed`/`expired`).
+- **Bounded memory:** the ZIP is assembled to a temp file on the worker's disk, reading each
+  source object in chunks (`ObjectStorageGateway.open_object_stream`) and writing chunked entries
+  — never the whole archive (or a whole file) in RAM — then multipart-uploaded with `upload_file`
+  (`fput_object`). The temp object lives at `_archives/{org_id}/{job_id}.zip`.
+- **Expiry is storage-native:** a bucket **lifecycle rule** on the `_archives/` prefix (set by
+  `minio-init`, `--expire-days 1`) deletes temp ZIPs — no cleanup job to maintain. `download_jobs`
+  also carries `expires_at` (`ARCHIVE_RETENTION_HOURS`); a `ready` job past it is reported
+  `expired` lazily on the next poll.
+- **S3-portable:** presigned GET, multipart upload and the lifecycle rule are all standard S3 API,
+  so MinIO-local → S3-prod is config (`MINIO_*`), not code — see the gateway note below.
+
+Full walkthrough + flow diagram: [`docs/3_files_flow/`](docs/3_files_flow/README.md).
 
 #### Lifecycle status (the deletion model)
 
@@ -169,8 +204,18 @@ Object keys are `"{org_id}/{folder_id}/{uuid}-{name}"`. Every query filters `org
 ### Key gotchas
 
 - **Object storage (MinIO).** The `minio` SDK is **synchronous**; `MinioObjectStorageGateway`
-  wraps `put_object` in `asyncio.to_thread`. The `driveclon` bucket is created by the
-  `minio-init` job (docker-compose). Config: `MINIO_*` env vars (see `app/core/config.py`).
+  wraps each call in `asyncio.to_thread` (`open_object_stream` is intentionally sync — it runs
+  inside the worker's zip-building thread). The `driveclon` bucket and its `_archives/` lifecycle
+  rule are created by the `minio-init` job (docker-compose). Config: `MINIO_*` env vars.
+- **Internal vs public storage URL (presigned URLs).** Same split as Keycloak. `MINIO_ENDPOINT`
+  (`minio:9000`) is for server-side ops; `MINIO_PUBLIC_ENDPOINT` is the host **presigned URLs are
+  signed against** so the browser can open them. In Docker the browser can't resolve `minio:9000`,
+  so expose port 9000 via a tunnel (ngrok) and set `MINIO_PUBLIC_ENDPOINT` to its URL. **SigV4
+  signs the `Host` header**, so the tunnel must forward the original Host to MinIO
+  (`ngrok http 9000 --host-header=preserve`) or downloads fail with `SignatureDoesNotMatch`. The
+  bucket also needs a CORS rule for the SPA origin. Empty `MINIO_PUBLIC_ENDPOINT` ⇒ the internal
+  endpoint is reused (fine only if the browser can reach it directly). With real S3 there is no
+  split — it's just the bucket URL.
 - **Internal vs public Keycloak URL.** Inside Docker the backend talks to `http://keycloak:8080`
   but token `iss` is the browser-facing `http://localhost:8080`. `KEYCLOAK_PUBLIC_URL` is
   validated as the issuer; `KEYCLOAK_URL` is used for server-to-server calls (JWKS, Admin API).

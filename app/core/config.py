@@ -40,13 +40,38 @@ class Settings(BaseSettings):
     KEYCLOAK_ADMIN_CLIENT_SECRET: str = ""
 
     # --- MinIO (almacenamiento de objetos, S3-compatible) -----------------
-    # Endpoint host:puerto SIN esquema (el SDK lo añade según MINIO_SECURE).
+    # Endpoint INTERNO host:puerto SIN esquema (el SDK lo añade según
+    # MINIO_SECURE). Lo usan backend y worker para hablar con el almacenamiento
+    # server-to-server (subir, descargar, multipart, borrar).
     MINIO_ENDPOINT: str = "localhost:9000"
     MINIO_ACCESS_KEY: str = "minioadmin"
     MINIO_SECRET_KEY: str = "minioadmin"
     MINIO_BUCKET: str = "driveclon"
     # En local va sobre HTTP; en producción debería ir sobre TLS.
     MINIO_SECURE: bool = False
+    # Endpoint PÚBLICO con el que se FIRMAN las URLs prefirmadas que abrirá el
+    # navegador. Mismo problema que `KEYCLOAK_PUBLIC_URL`: dentro de Docker el
+    # almacenamiento es `minio:9000`, pero el navegador no resuelve ese host;
+    # en local se expone vía un túnel (p. ej. ngrok al puerto 9000) y se pone
+    # aquí su URL (`https://xxxx.ngrok-free.app`). Vacío ⇒ se usa el interno
+    # (válido si el navegador alcanza MINIO_ENDPOINT directamente). En producción
+    # con S3 real no hay desdoblamiento: es la propia URL del bucket.
+    # OJO: SigV4 firma la cabecera `Host`; el túnel debe REENVIAR el Host
+    # original a MinIO (ngrok: `--host-header=preserve`) o la firma no validará.
+    MINIO_PUBLIC_ENDPOINT: str = ""
+
+    # --- Descarga de carpetas en ZIP (job asíncrono) ----------------------
+    # TTL (segundos) de la URL prefirmada de descarga del ZIP ya generado.
+    ARCHIVE_URL_TTL_SECONDS: int = 300
+    # Horas que el ZIP generado sigue disponible antes de considerarse expirado
+    # (alinear con la regla de ciclo de vida del bucket sobre `_archives/`, que
+    # borra el objeto temporal).
+    ARCHIVE_RETENTION_HOURS: int = 24
+    # Cada cuántos segundos sondea el worker la cola si no le llega un NOTIFY.
+    ARCHIVE_POLL_INTERVAL_SECONDS: int = 5
+    # Minutos tras los cuales un job atascado en 'processing' (worker caído a
+    # mitad) se recupera devolviéndolo a la cola.
+    ARCHIVE_STALE_TIMEOUT_MINUTES: int = 15
 
     # --- Papelera (soft delete + auto-purga) ------------------------------
     # Días que un elemento permanece en la papelera antes de borrarse
