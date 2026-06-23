@@ -196,6 +196,20 @@ class FolderRepository:
         )
         await self.db.commit()
 
+    # --- Cierre de cuenta (purga toda la org, conservando filas) ---------
+    async def mark_purged_in_org(self, org_id: int) -> None:
+        """Marca como purgadas todas las carpetas de la org (status=deleted,
+        deleted_at=now). NO borra filas: se conservan para analítica."""
+        await self.db.execute(
+            update(Folders)
+            .where(
+                Folders.org_id == org_id,
+                Folders.status != ResourceStatus.DELETED,
+            )
+            .values(status=ResourceStatus.DELETED, deleted_at=func.now())
+        )
+        await self.db.commit()
+
     async def create(
         self, name: str, org_id: int, owner_id: int, parent_id: int | None
     ) -> Folders:

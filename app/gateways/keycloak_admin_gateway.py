@@ -26,6 +26,11 @@ class KeycloakAdminGateway(ABC):
     async def add_member(self, organization_id: str, user_id: str) -> None:
         """Añade un usuario (por su `sub`) como miembro de la organización."""
 
+    @abstractmethod
+    async def delete_user(self, user_id: str) -> None:
+        """Borra un usuario (por su `sub`) de Keycloak para eliminar su PII.
+        Tolera que ya no exista (idempotente)."""
+
 
 class HttpKeycloakAdminGateway(KeycloakAdminGateway):
     """Implementación contra la REST Admin API usando un service account
@@ -93,6 +98,16 @@ class HttpKeycloakAdminGateway(KeycloakAdminGateway):
                 content=json.dumps(user_id),
             )
         response.raise_for_status()
+
+    async def delete_user(self, user_id: str) -> None:
+        headers = await self._headers()
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.delete(
+                f"{settings.admin_base_url}/users/{user_id}",
+                headers=headers,
+            )
+        if response.status_code != 404:
+            response.raise_for_status()
 
 
 # Instancia única reutilizable (mantiene cacheado el token de admin).

@@ -1,4 +1,6 @@
-from sqlalchemy import select
+from uuid import uuid4
+
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.Users import Users
@@ -63,6 +65,21 @@ class UserRepository:
         await self.db.commit()
         await self.db.refresh(user)
         return user
+
+    async def anonymize(self, user: Users) -> None:
+        """Anonimiza la PII del usuario y lo marca como borrado (`deleted_at`).
+
+        La fila se CONSERVA (los datos hacen falta para analítica); sólo se elimina
+        la información personal. `email` y `keycloak_sub` se sustituyen por valores
+        únicos (respetan los UNIQUE y evitan que un futuro login los reconcilie).
+        """
+        token = uuid4().hex
+        user.keycloak_sub = f"deleted-{token}"
+        user.email = f"deleted-{token}@anonymized.local"
+        user.name = ""
+        user.picture = ""
+        user.deleted_at = func.now()
+        await self.db.commit()
 
     async def update_profile(self, user: Users, name: str, picture: str) -> Users:
         """Sincroniza nombre/avatar desde el token si cambiaron (no pisa con vacío)."""

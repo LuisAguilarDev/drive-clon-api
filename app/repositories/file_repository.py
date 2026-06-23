@@ -221,6 +221,31 @@ class FileRepository:
         )
         await self.db.commit()
 
+    # --- Cierre de cuenta (purga toda la org, conservando filas) ---------
+    async def all_object_keys_in_org(self, org_id: int) -> list[str]:
+        """Claves MinIO de todos los ficheros de la org aún con objeto (no
+        purgados). Para borrar los binarios al cerrar la cuenta."""
+        result = await self.db.execute(
+            select(Files.object_key).where(
+                Files.org_id == org_id,
+                Files.status != ResourceStatus.DELETED,
+            )
+        )
+        return list(result.scalars().all())
+
+    async def mark_purged_in_org(self, org_id: int) -> None:
+        """Marca como purgados todos los ficheros de la org (status=deleted,
+        deleted_at=now). NO borra filas: se conservan para analítica."""
+        await self.db.execute(
+            update(Files)
+            .where(
+                Files.org_id == org_id,
+                Files.status != ResourceStatus.DELETED,
+            )
+            .values(status=ResourceStatus.DELETED, deleted_at=func.now())
+        )
+        await self.db.commit()
+
     async def create(
         self,
         name: str,

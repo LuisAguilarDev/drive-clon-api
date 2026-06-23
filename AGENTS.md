@@ -99,6 +99,15 @@ caller's `org_id`, resolved from the **DB mirror** (by token `sub`), not from th
 4. On first provisioning the response sets header `X-Org-Provisioned: true` (exposed via CORS
    in `main.py`); the frontend reacts by forcing a transparent token refresh so the next token
    carries the org membership.
+5. **Sub re-link**: Keycloak (H2 dev) resets give the same person a new `sub`. `ensure()` falls
+   back to `find_by_email` and re-links the new `sub` to the existing user (email is the stable,
+   Google-verified identity) instead of inserting a duplicate.
+
+**Account closure** (`DELETE /auth/account` → `AccountService`): privacy-preserving, not a hard
+delete. It removes the MinIO **binaries** (personal content) and marks the org's files/folders
+`status='deleted'`; anonymizes the user's PII (email/name/picture/`sub` → unique placeholders) and
+stamps `deleted_at` on the user; soft-deletes the org; and best-effort deletes the Keycloak user.
+**All rows are kept** for analytics. A later login with the same email starts a fresh account.
 
 ### Folders & files (`files` route group)
 

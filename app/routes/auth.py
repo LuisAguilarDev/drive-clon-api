@@ -5,16 +5,19 @@ primera llamada de cada usuario, provisiona su organización (una por usuario).
 """
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Response, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import CurrentUser
 from app.db.database import get_db
 from app.gateways.keycloak_admin_gateway import keycloak_admin_gateway
+from app.gateways.object_storage_gateway import object_storage_gateway
+from app.repositories.file_repository import FileRepository
 from app.repositories.folder_repository import FolderRepository
 from app.repositories.organization_repository import OrganizationRepository
 from app.repositories.user_repository import UserRepository
+from app.services.account_service import AccountService
 from app.services.ensure_organization_service import EnsureOrganizationService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -70,3 +73,24 @@ async def get_session(user: CurrentUser, db: db_dependency, response: Response):
             keycloak_org_id=result.organization.keycloak_org_id,
         ),
     )
+
+
+@router.delete("/account", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_account(user: CurrentUser, db: db_dependency):
+    """Cierra la cuenta del usuario.
+
+    Borra los binarios de MinIO (contenido personal) y anonimiza la PII del
+    usuario; usuario, organización, ficheros y carpetas se marcan como borrados
+    pero sus filas/metadatos se conservan para analítica. Limpia la PII en
+    Keycloak (best-effort). Idempotente.
+    """
+    service = AccountService(
+        user_repository=UserRepository(db),
+        organization_repository=OrganizationRepository(db),
+        folder_repository=FolderRepository(db),
+        file_repository=FileRepository(db),
+        storage=object_storage_gateway,
+        keycloak_admin=keycloak_admin_gateway,
+    )
+    await service.delete_account(user.sub)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
