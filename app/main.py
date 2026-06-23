@@ -4,10 +4,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.v1 import router as api_v1_router
+from app.api.v1.auth import ORG_PROVISIONED_HEADER
 from app.core.config import settings
 from app.jobs.trash_purge import purge_expired_trash
-from app.routes import auth, files
-from app.routes.auth import ORG_PROVISIONED_HEADER
 
 
 @asynccontextmanager
@@ -32,8 +32,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-app.include_router(auth.router)
-app.include_router(files.router)
+app.include_router(api_v1_router)
 
 allowed_origins = [origin.strip() for origin in settings.ALLOWED_ORIGINS.split(",")]
 

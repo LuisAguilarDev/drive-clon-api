@@ -8,7 +8,7 @@ from typing import Annotated
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import CurrentUser
@@ -69,8 +69,12 @@ class FolderListingResponse(BaseModel):
 
 
 class CreateFolderRequest(BaseModel):
-    name: str
-    parent_id: int
+    # El DTO valida por sí mismo (FastAPI devuelve 422 si no se cumple): el
+    # nombre se recorta y debe tener 1..255 caracteres; parent_id debe ser > 0.
+    name: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
+    ]
+    parent_id: int = Field(gt=0)
 
 
 class TrashFolderResponse(BaseModel):
@@ -171,13 +175,14 @@ async def list_folder(
 async def create_folder(
     user: CurrentUser, db: db_dependency, body: CreateFolderRequest
 ):
-    """Crea una carpeta dentro de un padre del mismo tenant."""
-    name = body.name.strip()
-    if not name:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "El nombre es obligatorio.")
+    """Crea una carpeta dentro de un padre del mismo tenant.
+
+    La validación del cuerpo la garantiza `CreateFolderRequest` (FastAPI valida
+    el DTO y responde 422 si no se cumple), así que el controlador queda fino.
+    """
     service = _build_service(db)
     try:
-        folder = await service.create_folder(user.sub, name, body.parent_id)
+        folder = await service.create_folder(user.sub, body.name, body.parent_id)
     except ResourceNotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     return _folder_response(folder)
@@ -209,7 +214,7 @@ async def download_file(user: CurrentUser, db: db_dependency, file_id: int):
 async def upload_file(
     user: CurrentUser,
     db: db_dependency,
-    folder_id: Annotated[int, Form()],
+    folder_id: Annotated[int, Form(gt=0)],
     file: Annotated[UploadFile, File()],
 ):
     """Sube un fichero (multipart) a una carpeta del tenant del llamante."""

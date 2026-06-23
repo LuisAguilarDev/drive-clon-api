@@ -66,7 +66,7 @@ federated); the backend validates the Bearer JWT against Keycloak's JWKS and use
 Strict one-directional layering — each layer depends only on the one below:
 
 ```
-routes/        Presentation: FastAPI routers + Pydantic request/response DTOs. Only orchestrate services.
+api/v1/        Presentation: versioned FastAPI routers + Pydantic request/response DTOs. One module per resource (auth, files). `api/v1/__init__.py` mounts them under the `/api/v1` prefix. Controllers only orchestrate services; request DTOs self-validate (FastAPI → 422).
 services/      Business logic. Depend on gateway interfaces + repositories, never on HTTP details.
 gateways/      Abstractions (ABC) over external systems (Keycloak Admin API, MinIO object storage). Code depends on the interface.
 repositories/  Data access over SQLAlchemy async sessions. One class per aggregate.
@@ -113,8 +113,11 @@ stamps `deleted_at` on the user; soft-deletes the org; and best-effort deletes t
 
 A user's **root folder** (`parent_id = NULL`, name `"My Drive"`) is provisioned by
 `EnsureOrganizationService.ensure()` alongside the org — idempotent, guaranteed unique by a
-**partial unique index** on `folders(owner_id) WHERE parent_id IS NULL AND deleted_at IS NULL`.
-The `files` router (`app/routes/files.py` → `FilesService`) exposes:
+**partial unique index** on `folders(owner_id) WHERE parent_id IS NULL AND status = 'active'`.
+
+**All API endpoints are versioned under the `/api/v1` prefix** (e.g. `GET /api/v1/files/root`,
+`GET /api/v1/auth/session`). Paths below omit the prefix for brevity. The `files` router
+(`app/api/v1/files.py` → `FilesService`) exposes:
 
 - `GET /files/root` — caller's root folder.
 - `GET /files?folder_id=<id>` — subfolders + files of a folder (root if omitted).
