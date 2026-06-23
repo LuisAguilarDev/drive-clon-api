@@ -114,10 +114,24 @@ The `files` router (`app/routes/files.py` → `FilesService`) exposes:
 - `DELETE /files/{file_id}` — soft-delete a single file → moves it to the trash (204). The MinIO object is kept.
 - `DELETE /files/folders/{folder_id}` — soft-delete a folder and its whole subtree (subfolders + files) recursively (204). The root folder cannot be deleted (400).
 
+#### Lifecycle status (the deletion model)
+
+Files and folders carry a single **`status`** column (Postgres native enum `resource_status`)
+that is the **only discriminator queries filter on** — never a combination of timestamps:
+
+- `active` → visible in My Drive; object exists in MinIO.
+- `trashed` → in the trash, recoverable; object still in MinIO.
+- `deleted` → permanently purged: the **MinIO object is removed but the DB row is kept** (for
+  analytics — uploads/deletions per month, per user, etc.). Rows are **never** physically deleted.
+
+Timestamps `trashed_at` and `deleted_at` are **metadata only** (when it entered the trash / when
+it was purged); they are not used to decide visibility. Search is therefore trivial:
+`WHERE status = 'active'` (drive), `WHERE status = 'trashed'` (trash). The auto-purge job is the
+only place that reads a timestamp (`trashed_at < cutoff`).
+
 #### Trash (papelera)
 
-Soft delete **is** the trash: an item is "in the trash" when `deleted_at IS NOT NULL`. The
-trash is **per user** (scoped by `owner_id` + `org_id`) and lists only **top-level** trashed
+The trash is **per user** (scoped by `owner_id` + `org_id`) and lists only **top-level** trashed
 items — a file whose folder is also trashed, or a subfolder of a trashed folder, is hidden
 (it hangs from its parent and is restored/purged with it).
 
@@ -130,12 +144,13 @@ items — a file whose folder is also trashed, or a subfolder of a trashed folde
 
 `/files/trash` is declared **before** `/files/{file_id}` so "trash" is not parsed as an int id.
 Auto-purge: a scheduled job (`app/jobs/trash_purge.py`, APScheduler in the lifespan) permanently
-deletes items trashed more than `TRASH_RETENTION_DAYS` days ago (default 30), every
-`TRASH_PURGE_INTERVAL_HOURS` (default 24) across all orgs.
+purges items trashed more than `TRASH_RETENTION_DAYS` days ago (default 30), every
+`TRASH_PURGE_INTERVAL_HOURS` (default 24) across all orgs — removing the MinIO object and setting
+`status='deleted'` (the row stays).
 
 Object keys are `"{org_id}/{folder_id}/{uuid}-{name}"`. Every query filters `org_id` **and**
-`deleted_at IS NULL`; a folder/file from another tenant resolves as **404** (never leak
-existence). `owner.is_me` is computed by comparing `owner_id` to the caller's DB user id.
+`status`; a folder/file from another tenant resolves as **404** (never leak existence).
+`owner.is_me` is computed by comparing `owner_id` to the caller's DB user id.
 
 ### Key gotchas
 
@@ -145,11 +160,12 @@ existence). `owner.is_me` is computed by comparing `owner_id` to the caller's DB
 - **Internal vs public Keycloak URL.** Inside Docker the backend talks to `http://keycloak:8080`
   but token `iss` is the browser-facing `http://localhost:8080`. `KEYCLOAK_PUBLIC_URL` is
   validated as the issuer; `KEYCLOAK_URL` is used for server-to-server calls (JWKS, Admin API).
-- **Soft delete.** Models carry `deleted_at` (NULL = alive). Queries must filter
-  `deleted_at IS NULL` (see `UserRepository.find_by_sub`). Prefer soft deletes over hard deletes.
-  Soft delete doubles as the **trash**; physical deletion of the MinIO object only happens on
-  permanent purge (`/permanent`, empty trash, or the auto-purge job), via
-  `ObjectStorageGateway.remove_objects`.
+- **Lifecycle status (files & folders).** Use the `status` enum (`active`/`trashed`/`deleted`)
+  as the single filter — never combine timestamps. Rows are **never** physically deleted; a
+  permanent purge (`/permanent`, empty trash, or the auto-purge job) removes the MinIO object via
+  `ObjectStorageGateway.remove_objects` and sets `status='deleted'`, keeping the row for analytics.
+- **Soft delete (other models).** `organizations`/`users` still use `deleted_at` (NULL = alive);
+  those queries filter `deleted_at IS NULL` (see `UserRepository.find_by_sub`).
 - **Async everywhere.** SQLAlchemy uses the asyncpg driver; `Settings.async_database_url`
   rewrites a sync `postgresql://` URL to `postgresql+asyncpg://` automatically.
 - **Migrations run in a thread.** `run_migrations()` offloads Alembic to a worker thread

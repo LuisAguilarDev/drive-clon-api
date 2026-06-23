@@ -1,13 +1,18 @@
-"""Acceso a datos de ficheros. Toda consulta filtra por `org_id` (tenant) y por
-`deleted_at IS NULL` (soft delete)."""
+"""Acceso a datos de ficheros.
+
+Toda consulta filtra por `org_id` (tenant) y por `status` (ÚNICO discriminador
+del ciclo de vida: active/trashed/deleted). Las filas NUNCA se borran; el borrado
+permanente sólo marca `status='deleted'` y limpia el binario de MinIO aparte.
+"""
 from datetime import datetime
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.Files import Files
 from app.models.Folders import Folders
 from app.models.Users import Users
+from app.models.resource_status import ResourceStatus
 
 
 class FileRepository:
@@ -17,7 +22,7 @@ class FileRepository:
     async def list_by_folder(
         self, folder_id: int, org_id: int
     ) -> list[tuple[Files, str | None]]:
-        """Ficheros vivos de una carpeta junto al nombre de su propietario.
+        """Ficheros activos de una carpeta junto al nombre de su propietario.
 
         Devuelve filas `(Files, owner_name)` para que la capa de servicio pueda
         construir la respuesta (incluido `is_me`) sin consultas extra por fichero.
@@ -28,37 +33,37 @@ class FileRepository:
             .where(
                 Files.folder_id == folder_id,
                 Files.org_id == org_id,
-                Files.deleted_at.is_(None),
+                Files.status == ResourceStatus.ACTIVE,
             )
             .order_by(Files.name)
         )
         return [(row[0], row[1]) for row in result.all()]
 
     async def find_by_id(self, file_id: int, org_id: int) -> Files | None:
-        """Fichero por id, acotado al tenant del llamante (no cruza orgs)."""
+        """Fichero ACTIVO por id, acotado al tenant del llamante (no cruza orgs)."""
         result = await self.db.execute(
             select(Files).where(
                 Files.id == file_id,
                 Files.org_id == org_id,
-                Files.deleted_at.is_(None),
+                Files.status == ResourceStatus.ACTIVE,
             )
         )
         return result.scalars().first()
 
+    # --- Mover a la papelera (soft delete) -------------------------------
     async def soft_delete(self, file_id: int, org_id: int) -> bool:
-        """Marca un fichero como borrado (soft delete). Devuelve si afectó a algo.
+        """Mueve un fichero a la papelera. Devuelve si afectó a algo.
 
-        El binario en MinIO se conserva: el borrado es lógico, coherente con el
-        resto del modelo (`deleted_at IS NULL` = vivo).
+        El binario en MinIO se conserva: el fichero queda recuperable.
         """
         result = await self.db.execute(
             update(Files)
             .where(
                 Files.id == file_id,
                 Files.org_id == org_id,
-                Files.deleted_at.is_(None),
+                Files.status == ResourceStatus.ACTIVE,
             )
-            .values(deleted_at=func.now())
+            .values(status=ResourceStatus.TRASHED, trashed_at=func.now())
         )
         await self.db.commit()
         return (result.rowcount or 0) > 0
@@ -66,7 +71,7 @@ class FileRepository:
     async def soft_delete_in_folders(
         self, folder_ids: list[int], org_id: int
     ) -> None:
-        """Marca como borrados todos los ficheros vivos de las carpetas dadas."""
+        """Mueve a la papelera todos los ficheros activos de las carpetas dadas."""
         if not folder_ids:
             return
         await self.db.execute(
@@ -74,19 +79,19 @@ class FileRepository:
             .where(
                 Files.folder_id.in_(folder_ids),
                 Files.org_id == org_id,
-                Files.deleted_at.is_(None),
+                Files.status == ResourceStatus.ACTIVE,
             )
-            .values(deleted_at=func.now())
+            .values(status=ResourceStatus.TRASHED, trashed_at=func.now())
         )
         await self.db.commit()
 
-    # --- Papelera (soft delete) ------------------------------------------
+    # --- Papelera --------------------------------------------------------
     async def list_trashed(self, owner_id: int, org_id: int) -> list[Files]:
         """Ficheros en papelera del usuario borrados *individualmente*.
 
-        Un fichero aparece en la papelera sólo si su carpeta sigue viva. Si la
-        carpeta también está borrada, el fichero se restaura/purga junto a ella
-        (se muestra colgando de la carpeta, no suelto).
+        Un fichero aparece en la papelera sólo si su carpeta sigue activa. Si la
+        carpeta también está en la papelera, el fichero se restaura/purga junto a
+        ella (cuelga de la carpeta, no se muestra suelto).
         """
         result = await self.db.execute(
             select(Files)
@@ -94,57 +99,61 @@ class FileRepository:
             .where(
                 Files.owner_id == owner_id,
                 Files.org_id == org_id,
-                Files.deleted_at.is_not(None),
-                Folders.deleted_at.is_(None),
+                Files.status == ResourceStatus.TRASHED,
+                Folders.status == ResourceStatus.ACTIVE,
             )
-            .order_by(Files.deleted_at.desc())
+            .order_by(Files.trashed_at.desc())
         )
         return list(result.scalars().all())
 
     async def find_trashed_by_id(
         self, file_id: int, owner_id: int, org_id: int
     ) -> Files | None:
-        """Fichero borrado por id, acotado al usuario y al tenant."""
+        """Fichero en papelera por id, acotado al usuario y al tenant."""
         result = await self.db.execute(
             select(Files).where(
                 Files.id == file_id,
                 Files.owner_id == owner_id,
                 Files.org_id == org_id,
-                Files.deleted_at.is_not(None),
+                Files.status == ResourceStatus.TRASHED,
             )
         )
         return result.scalars().first()
 
     async def list_trashed_before(self, cutoff: datetime) -> list[Files]:
-        """Ficheros en papelera borrados antes de `cutoff` (todas las orgs).
+        """Ficheros en papelera movidos antes de `cutoff` (todas las orgs).
 
-        Sólo los de carpeta viva (los de carpetas borradas se purgan con ellas).
-        Uso exclusivo del job de auto-purga.
+        Sólo los de carpeta activa (los de carpetas en papelera se purgan con
+        ellas). Uso exclusivo del job de auto-purga.
         """
         result = await self.db.execute(
             select(Files)
             .join(Folders, Files.folder_id == Folders.id)
             .where(
-                Files.deleted_at.is_not(None),
-                Files.deleted_at < cutoff,
-                Folders.deleted_at.is_(None),
+                Files.status == ResourceStatus.TRASHED,
+                Files.trashed_at < cutoff,
+                Folders.status == ResourceStatus.ACTIVE,
             )
         )
         return list(result.scalars().all())
 
     async def restore(self, file_id: int, org_id: int, folder_id: int) -> None:
-        """Revive un fichero y lo coloca en `folder_id` (su carpeta o la raíz)."""
+        """Revive un fichero (status=active) y lo coloca en `folder_id`."""
         await self.db.execute(
             update(Files)
             .where(Files.id == file_id, Files.org_id == org_id)
-            .values(deleted_at=None, folder_id=folder_id)
+            .values(
+                status=ResourceStatus.ACTIVE,
+                trashed_at=None,
+                folder_id=folder_id,
+            )
         )
         await self.db.commit()
 
     async def restore_in_folders(
         self, folder_ids: list[int], org_id: int
     ) -> None:
-        """Revive todos los ficheros borrados de las carpetas dadas."""
+        """Revive todos los ficheros en papelera de las carpetas dadas."""
         if not folder_ids:
             return
         await self.db.execute(
@@ -152,19 +161,20 @@ class FileRepository:
             .where(
                 Files.folder_id.in_(folder_ids),
                 Files.org_id == org_id,
-                Files.deleted_at.is_not(None),
+                Files.status == ResourceStatus.TRASHED,
             )
-            .values(deleted_at=None)
+            .values(status=ResourceStatus.ACTIVE, trashed_at=None)
         )
         await self.db.commit()
 
-    # --- Borrado físico (purga definitiva: BD + MinIO) -------------------
+    # --- Borrado permanente (purga: BD conservada + MinIO eliminado) -----
     async def object_keys_in_folders(
         self, folder_ids: list[int], org_id: int
     ) -> list[str]:
-        """Claves MinIO de todos los ficheros (vivos o no) de las carpetas dadas.
+        """Claves MinIO de los ficheros aún no purgados de las carpetas dadas.
 
-        Se usa antes de la purga para saber qué binarios borrar de MinIO.
+        Se usa antes de la purga para saber qué binarios borrar de MinIO; excluye
+        los ya purgados (status='deleted'), que ya no tienen objeto.
         """
         if not folder_ids:
             return []
@@ -172,28 +182,42 @@ class FileRepository:
             select(Files.object_key).where(
                 Files.folder_id.in_(folder_ids),
                 Files.org_id == org_id,
+                Files.status != ResourceStatus.DELETED,
             )
         )
         return list(result.scalars().all())
 
-    async def hard_delete(self, file_id: int, org_id: int) -> None:
-        """Borra DEFINITIVAMENTE la fila del fichero (sin tocar MinIO)."""
+    async def mark_purged(self, file_id: int, org_id: int) -> None:
+        """Marca un fichero como purgado (status=deleted, deleted_at=now).
+
+        NO borra la fila: se conserva para analítica. El binario de MinIO se
+        elimina aparte (en la capa de servicio).
+        """
         await self.db.execute(
-            delete(Files).where(Files.id == file_id, Files.org_id == org_id)
+            update(Files)
+            .where(
+                Files.id == file_id,
+                Files.org_id == org_id,
+                Files.status != ResourceStatus.DELETED,
+            )
+            .values(status=ResourceStatus.DELETED, deleted_at=func.now())
         )
         await self.db.commit()
 
-    async def hard_delete_in_folders(
+    async def mark_purged_in_folders(
         self, folder_ids: list[int], org_id: int
     ) -> None:
-        """Borra DEFINITIVAMENTE las filas de todos los ficheros de las carpetas."""
+        """Marca como purgados todos los ficheros aún no purgados de las carpetas."""
         if not folder_ids:
             return
         await self.db.execute(
-            delete(Files).where(
+            update(Files)
+            .where(
                 Files.folder_id.in_(folder_ids),
                 Files.org_id == org_id,
+                Files.status != ResourceStatus.DELETED,
             )
+            .values(status=ResourceStatus.DELETED, deleted_at=func.now())
         )
         await self.db.commit()
 

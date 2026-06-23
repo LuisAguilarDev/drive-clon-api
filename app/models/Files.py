@@ -1,6 +1,16 @@
-from sqlalchemy import BigInteger, Column, DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import (
+    BigInteger,
+    Column,
+    DateTime,
+    Enum as SQLEnum,
+    ForeignKey,
+    Integer,
+    String,
+    func,
+)
 
 from app.db.database import Base
+from app.models.resource_status import ResourceStatus
 
 
 class Files(Base):
@@ -9,6 +19,10 @@ class Files(Base):
     El binario vive en MinIO bajo `object_key`; esta fila guarda los metadatos.
     Invariante multi-tenant: `org_id` aísla por organización y `folder_id` debe
     apuntar a una carpeta de la **misma** organización.
+
+    Ciclo de vida: ver `ResourceStatus`. La fila NUNCA se borra (se conserva para
+    analítica); el borrado permanente sólo elimina el binario de MinIO y marca
+    `status = DELETED`.
     """
 
     __tablename__ = "files"
@@ -25,5 +39,19 @@ class Files(Base):
     org_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    # Soft delete: una fila está "viva" cuando deleted_at IS NULL.
+    # Estado del ciclo de vida: ÚNICO discriminador de las búsquedas.
+    status = Column(
+        SQLEnum(
+            ResourceStatus,
+            name="resource_status",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        nullable=False,
+        server_default=ResourceStatus.ACTIVE.value,
+        default=ResourceStatus.ACTIVE,
+        index=True,
+    )
+    # Metadata (analítica): cuándo se movió a la papelera y cuándo se purgó de
+    # MinIO. No se usan para filtrar visibilidad, sólo `status`.
+    trashed_at = Column(DateTime(timezone=True), nullable=True, default=None)
     deleted_at = Column(DateTime(timezone=True), nullable=True, default=None)

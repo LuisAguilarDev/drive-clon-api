@@ -14,6 +14,7 @@ from uuid import uuid4
 from app.gateways.object_storage_gateway import ObjectStorageGateway
 from app.models.Files import Files
 from app.models.Folders import Folders
+from app.models.resource_status import ResourceStatus
 from app.repositories.file_repository import FileRepository
 from app.repositories.folder_repository import FolderRepository
 from app.repositories.user_repository import UserRepository
@@ -286,25 +287,27 @@ class FilesService:
         return purged
 
     async def _purge_file(self, file: Files, org_id: int) -> None:
-        """Borra el binario de MinIO y luego la fila. Si MinIO falla, la fila se
-        conserva para reintentar (nunca quedan objetos huérfanos sin referencia)."""
+        """Borra el binario de MinIO y marca la fila como purgada (conservada).
+        Si MinIO falla, la fila sigue en papelera para reintentar (nunca quedan
+        objetos huérfanos sin referencia)."""
         await self._storage.remove_objects([file.object_key])
-        await self._files.hard_delete(file.id, org_id)
+        await self._files.mark_purged(file.id, org_id)
 
     async def _purge_folder(self, folder: Folders, org_id: int) -> None:
-        """Purga una carpeta y su subárbol: MinIO primero, luego ficheros y al
-        final las carpetas (respeta las FKs: ficheros → carpetas)."""
+        """Purga una carpeta y su subárbol: elimina los binarios de MinIO y marca
+        las filas como purgadas (status=deleted). Las filas se conservan para
+        analítica."""
         folder_ids = await self._collect_subtree_ids_any_state(folder, org_id)
         object_keys = await self._files.object_keys_in_folders(folder_ids, org_id)
         await self._storage.remove_objects(object_keys)
-        await self._files.hard_delete_in_folders(folder_ids, org_id)
-        await self._folders.hard_delete_in_ids(folder_ids, org_id)
+        await self._files.mark_purged_in_folders(folder_ids, org_id)
+        await self._folders.mark_purged_in_ids(folder_ids, org_id)
 
     async def _restore_target_folder_id(
         self, user, original_folder_id: int | None
     ) -> int:
-        """Carpeta destino al restaurar: la original si sigue viva, o la raíz si
-        fue borrada/purgada (así una restauración nunca falla por padre ausente)."""
+        """Carpeta destino al restaurar: la original si sigue activa, o la raíz si
+        ya no lo está (así una restauración nunca falla por padre ausente)."""
         root = await self._folders.find_root(user.id, user.org_id)
         if root is None:
             raise ResourceNotFound("El usuario no tiene carpeta raíz.")
@@ -313,7 +316,7 @@ class FilesService:
         original = await self._folders.find_any_by_id(
             original_folder_id, user.org_id
         )
-        if original is None or original.deleted_at is not None:
+        if original is None or original.status != ResourceStatus.ACTIVE:
             return root.id
         return original_folder_id
 

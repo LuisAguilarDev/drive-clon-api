@@ -77,7 +77,8 @@ class TrashFolderResponse(BaseModel):
     id: int
     name: str
     parent_id: int | None = None
-    deleted_at: datetime
+    # Cuándo se movió a la papelera (metadata para la UI).
+    trashed_at: datetime
 
 
 class TrashFileResponse(BaseModel):
@@ -85,7 +86,8 @@ class TrashFileResponse(BaseModel):
     name: str
     content_type: str | None
     size_bytes: int | None
-    deleted_at: datetime
+    # Cuándo se movió a la papelera (metadata para la UI).
+    trashed_at: datetime
 
 
 class TrashListingResponse(BaseModel):
@@ -253,7 +255,7 @@ async def list_trash(user: CurrentUser, db: db_dependency):
                 id=f.id,
                 name=f.name,
                 parent_id=f.parent_id,
-                deleted_at=f.deleted_at,
+                trashed_at=f.trashed_at,
             )
             for f in trash.folders
         ],
@@ -263,7 +265,7 @@ async def list_trash(user: CurrentUser, db: db_dependency):
                 name=f.name,
                 content_type=f.content_type,
                 size_bytes=f.size_bytes,
-                deleted_at=f.deleted_at,
+                trashed_at=f.trashed_at,
             )
             for f in trash.files
         ],
