@@ -1,0 +1,49 @@
+// -----------------------------------------------------------------------------
+// Drive Clon — Subida de fichero con URL prefirmada (init → PUT → confirm)
+//
+// Diagrama de FLUJO en notación DOT (Graphviz). El backend NUNCA recibe el
+// binario: entrega una URL prefirmada y el navegador sube directo al
+// almacenamiento; al confirmar, el backend verifica el objeto y activa la fila.
+//
+// Render:
+//   dot -Tpng docs/3_files_flow/upload.gv -o docs/3_files_flow/upload.png
+//   dot -Tsvg docs/3_files_flow/upload.gv -o docs/3_files_flow/upload.svg
+//
+// Colores: navegador gris, API azul, Postgres verde, almacenamiento dorado.
+// -----------------------------------------------------------------------------
+digraph files_upload_flow {
+  rankdir=TB;
+  bgcolor="white";
+  graph [fontname="Helvetica", labelloc="t", fontsize=16,
+         label="Subida de fichero con URL prefirmada (init → PUT → confirm)",
+         pad="0.4", nodesep="0.5", ranksep="0.7"];
+  node  [fontname="Helvetica", fontsize=11];
+  edge  [fontname="Helvetica", fontsize=10, color="#4a5568"];
+
+  node [shape=box, style="rounded,filled", fontcolor="white"];
+  browser [label="Navegador (SPA)\ndrive-clon-ui", fillcolor="#4a5568"];
+  api     [label="Backend API\n(FastAPI · FilesService)", fillcolor="#2b6cb0"];
+  db      [label="Postgres\ntabla files", fillcolor="#2f855a"];
+  storage [label="Object Storage\nMinIO (local) / S3 (prod)", fillcolor="#b7791f"];
+
+  node [shape=note, style="filled", fillcolor="#fefcbf", fontcolor="#000000", fontsize=9];
+  cleanup [label="Job pending-uploads-cleanup:\nfilas 'pending' sin confirmar\n> timeout → se borran (fila + objeto)"];
+
+  // 1-2) init: sólo metadatos, devuelve URL prefirmada
+  browser -> api [label="1. POST /files { filename, size_bytes, folder_id }"];
+  api -> db      [label="2. INSERT files (status=pending)"];
+  api -> storage [label="3. presign_put (cliente público)"];
+  api -> browser [label="4. 201 { file_id, upload_url }", constraint=false, color="#2b6cb0"];
+
+  // 5) PUT directo al almacenamiento (no pasa por el backend)
+  browser -> storage [label="5. PUT binario a upload_url\n(DIRECTO; no pasa por el backend)",
+                      color="#b7791f", penwidth=2];
+
+  // 6-9) confirm: verifica y activa
+  browser -> api [label="6. POST /files/{file_id}/confirm"];
+  api -> storage [label="7. stat (¿existe? tamaño real)"];
+  api -> db      [label="8. activate: pending → active\n(size real, valida máx.)"];
+  api -> browser [label="9. 200 FileResponse (activo)", constraint=false, color="#2b6cb0"];
+
+  cleanup -> db [style=dotted, arrowhead=none, color="#a0aec0", constraint=false];
+}

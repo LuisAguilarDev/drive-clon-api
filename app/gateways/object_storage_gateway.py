@@ -7,7 +7,6 @@ credenciales), no código: las URLs prefirmadas, el multipart y el ciclo de vida
 del bucket son API estándar de S3.
 """
 import asyncio
-import io
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -35,12 +34,6 @@ class ObjectStat:
 
 class ObjectStorageGateway(ABC):
     """Abstract base class para el almacenamiento de objetos."""
-
-    @abstractmethod
-    async def put_object(
-        self, object_key: str, data: bytes, content_type: str | None
-    ) -> None:
-        """Sube un objeto (bytes) bajo la clave indicada en el bucket privado."""
 
     @abstractmethod
     async def presign_put(self, object_key: str, expires_seconds: int) -> str:
@@ -120,20 +113,6 @@ class MinioObjectStorageGateway(ObjectStorageGateway):
             access_key=settings.MINIO_ACCESS_KEY,
             secret_key=settings.MINIO_SECRET_KEY,
             secure=secure,
-        )
-
-    async def put_object(
-        self, object_key: str, data: bytes, content_type: str | None
-    ) -> None:
-        # El SDK de MinIO es síncrono: se descarga a un hilo para no bloquear el
-        # event loop. El bucket lo crea `minio-init` (docker-compose).
-        await asyncio.to_thread(
-            self._client.put_object,
-            self._bucket,
-            object_key,
-            io.BytesIO(data),
-            len(data),
-            content_type or "application/octet-stream",
         )
 
     async def get_object(self, object_key: str) -> bytes:

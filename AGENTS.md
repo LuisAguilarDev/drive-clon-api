@@ -218,10 +218,15 @@ Object keys are `"{org_id}/{folder_id}/{uuid}-{name}"`. Every query filters `org
   signed against** so the browser can open them. In Docker the browser can't resolve `minio:9000`,
   so expose port 9000 via a tunnel (ngrok) and set `MINIO_PUBLIC_ENDPOINT` to its URL. **SigV4
   signs the `Host` header**, so the tunnel must forward the original Host to MinIO
-  (`ngrok http 9000 --host-header=preserve`) or downloads fail with `SignatureDoesNotMatch`. The
-  bucket also needs a CORS rule for the SPA origin. Empty `MINIO_PUBLIC_ENDPOINT` ⇒ the internal
-  endpoint is reused (fine only if the browser can reach it directly). With real S3 there is no
-  split — it's just the bucket URL.
+  (`ngrok http 9000 --host-header=preserve`) or **both presigned uploads (PUT) and downloads (GET)**
+  fail with `SignatureDoesNotMatch`. The bucket also needs a **CORS rule** for the SPA origin
+  allowing `PUT` + `GET` (a presigned upload is a cross-origin PUT → OPTIONS preflight). Empty
+  `MINIO_PUBLIC_ENDPOINT` ⇒ the internal endpoint is reused (fine only if the browser can reach it
+  directly). With real S3 there is no split — it's just the bucket URL.
+- **Presigned uploads (`POST /files` → PUT → confirm).** `presign_put` signs only method+key+expiry
+  (not Content-Type), so the browser can PUT with any `Content-Type` without breaking the signature.
+  `size_bytes` is validated at init; `confirm` re-checks the **real** object size via `stat` and
+  cleans up oversize uploads. Files sit `pending` until confirmed.
 - **Internal vs public Keycloak URL.** Inside Docker the backend talks to `http://keycloak:8080`
   but token `iss` is the browser-facing `http://localhost:8080`. `KEYCLOAK_PUBLIC_URL` is
   validated as the issuer; `KEYCLOAK_URL` is used for server-to-server calls (JWKS, Admin API).

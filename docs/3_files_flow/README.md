@@ -1,21 +1,24 @@
 # Flujo de ficheros
 
-Documenta cómo viaja un fichero por el sistema: subida, listado, descarga
-individual, papelera y —sobre todo— la **descarga de una carpeta en ZIP**, que
-es asíncrona (patrón petición / worker) y la parte más fácil de olvidar.
+Documenta cómo viaja un fichero por el sistema. Las dos partes con más miga, y
+las que más fácil se olvidan, son: la **subida con URL prefirmada** (el binario
+no pasa por el backend) y la **descarga de una carpeta en ZIP** (asíncrona,
+patrón petición / worker).
 
-- Diagrama de flujo (fuente Graphviz): [`graph.gv`](./graph.gv)
+- Diagramas de flujo (fuente Graphviz): [`upload.gv`](./upload.gv) (subida) ·
+  [`graph.gv`](./graph.gv) (descarga ZIP)
 - Código: [`app/api/v1/files.py`](../../app/api/v1/files.py) ·
+  [`app/services/files_service.py`](../../app/services/files_service.py) ·
   [`app/services/archive_service.py`](../../app/services/archive_service.py) ·
   [`app/jobs/archive_worker.py`](../../app/jobs/archive_worker.py) ·
   [`app/gateways/object_storage_gateway.py`](../../app/gateways/object_storage_gateway.py)
 
-Para renderizar el diagrama necesitas [Graphviz](https://graphviz.org/download/):
+Para renderizar los diagramas necesitas [Graphviz](https://graphviz.org/download/):
 
 ```bash
 # desde la raíz del repo (drive-clon-fast-api/)
-dot -Tpng docs/3_files_flow/graph.gv -o docs/3_files_flow/graph.png
-dot -Tsvg docs/3_files_flow/graph.gv -o docs/3_files_flow/graph.svg
+dot -Tsvg docs/3_files_flow/upload.gv -o docs/3_files_flow/upload.svg
+dot -Tsvg docs/3_files_flow/graph.gv  -o docs/3_files_flow/graph.svg
 ```
 
 > Todos los endpoints van bajo el prefijo `/api/v1` (se omite aquí por brevedad)
@@ -31,7 +34,8 @@ dot -Tsvg docs/3_files_flow/graph.gv -o docs/3_files_flow/graph.svg
 | GET  | `/files/root` | sí | Carpeta raíz del usuario. |
 | GET  | `/files?folder_id=<id>` | sí | Subcarpetas + ficheros (raíz si se omite). |
 | POST | `/files/folders` | sí | Crea una carpeta. |
-| POST | `/files` | sí | Subida multipart → objeto en MinIO + fila en Postgres. |
+| **POST** | **`/files`** | **no (init)** | **Inicia subida prefirmada: metadatos → `{ file_id, upload_url }`. El binario lo sube el cliente DIRECTO al almacenamiento.** |
+| **POST** | **`/files/{file_id}/confirm`** | **sí** | **Confirma la subida: verifica el objeto y activa el fichero (`pending → active`).** |
 | GET  | `/files/{file_id}/download` | sí | Descarga el binario de un fichero. |
 | **POST** | **`/files/folders/{folder_id}/archive`** | **no (encola)** | **Encola el ZIP de la carpeta + subárbol. Devuelve `202 { job_id }`.** |
 | **GET** | **`/files/archives/{job_id}`** | **no (poll)** | **Estado del job; cuando está listo, trae `download_url` prefirmada.** |
@@ -45,7 +49,37 @@ dot -Tsvg docs/3_files_flow/graph.gv -o docs/3_files_flow/graph.svg
 
 ---
 
-## 2. Descarga de carpeta en ZIP — flujo asíncrono
+## 2. Subida de fichero — URL prefirmada
+
+El binario **no pasa por el backend**: éste sólo entrega una URL prefirmada y
+verifica el resultado. Tres pasos (números = [`upload.gv`](./upload.gv)):
+
+1. `POST /files` con **metadatos** (`filename`, `content_type`, `size_bytes`,
+   `folder_id`). La API valida tamaño (`MAX_UPLOAD_SIZE_BYTES`) y tenant.
+2. Inserta la fila en `files` con `status='pending'` (invisible en toda vista).
+3. Firma una URL de **subida** (`presign_put`, endpoint público) y responde
+   `201 { file_id, upload_url }`.
+4. (respuesta al cliente)
+5. El navegador hace **`PUT` del binario DIRECTO al almacenamiento** con esa URL.
+   No se le adjunta el Bearer (rompería la firma SigV4).
+6. `POST /files/{file_id}/confirm`.
+7. La API hace `stat` del objeto: comprueba que llegó y su **tamaño real**.
+8. Activa la fila (`pending → active`) con el tamaño real (revalida el máximo).
+9. Responde el `FileResponse` ya activo.
+
+**Por qué así:** memoria del backend plana (nunca ve los bytes), el ancho de
+banda lo asume el almacenamiento, y hay límite de tamaño en el boundary. Las
+subidas que se inician y nunca se confirman quedan `pending` y las limpia el job
+`pending-uploads-cleanup` (`PENDING_UPLOAD_TIMEOUT_HOURS`) — borra fila + objeto
+huérfano. Es el **único** sitio donde se borra físicamente una fila (una subida
+abandonada no es contenido real ni dato de analítica).
+
+> `presign_put` firma sólo método+clave+expiración (no el `Content-Type`), así
+> que el navegador puede subir con cualquier tipo sin desajustar la firma.
+
+---
+
+## 3. Descarga de carpeta en ZIP — flujo asíncrono
 
 El ZIP **no** se construye dentro de la petición HTTP. Se separa la **petición**
 del **trabajo**: la petición encola un job y responde en milisegundos; un worker
@@ -80,7 +114,7 @@ URL prefirmada. Los números coinciden con [`graph.gv`](./graph.gv).
 
 ---
 
-## 3. Por qué este diseño (decisiones)
+## 4. Por qué este diseño (decisiones)
 
 - **Petición / worker separados.** La petición no se bloquea armando el ZIP; el
   worker es un proceso aparte, **escalable por su cuenta**
@@ -108,7 +142,7 @@ URL prefirmada. Los números coinciden con [`graph.gv`](./graph.gv).
 
 ---
 
-## 4. Estados del job (`download_jobs.status`)
+## 5. Estados del job (`download_jobs.status`)
 
 | Estado | Significado |
 |--------|-------------|
@@ -124,7 +158,7 @@ Migración de la tabla: revisión `3e4f5a6b7c8d` en
 
 ---
 
-## 5. Configuración
+## 6. Configuración
 
 Variables en [`app/core/config.py`](../../app/core/config.py) (todas con valor por
 defecto; se sobreescriben por entorno):
@@ -132,7 +166,10 @@ defecto; se sobreescriben por entorno):
 | Variable | Por defecto | Para qué |
 |----------|-------------|----------|
 | `MINIO_ENDPOINT` | `localhost:9000` | Endpoint **interno** (backend/worker ↔ almacenamiento). |
-| `MINIO_PUBLIC_ENDPOINT` | `""` | Endpoint **público** con el que se firman las URLs prefirmadas que abre el navegador. |
+| `MINIO_PUBLIC_ENDPOINT` | `""` | Endpoint **público** con el que se firman las URLs prefirmadas (subida y descarga) que abre el navegador. |
+| `MAX_UPLOAD_SIZE_BYTES` | `5 GiB` | Tamaño máximo de subida (se valida al iniciar y se revalida con el tamaño real al confirmar). |
+| `UPLOAD_URL_TTL_SECONDS` | `600` | Validez de la URL prefirmada de subida (PUT). |
+| `PENDING_UPLOAD_TIMEOUT_HOURS` | `24` | Tras esto, una subida sin confirmar (`pending`) se limpia (fila + objeto). |
 | `ARCHIVE_URL_TTL_SECONDS` | `300` | Validez de la URL prefirmada de descarga. |
 | `ARCHIVE_RETENTION_HOURS` | `24` | Horas antes de considerar el ZIP `expired` (alinear con el ciclo de vida del bucket). |
 | `ARCHIVE_POLL_INTERVAL_SECONDS` | `5` | Cada cuánto sondea el worker si no llega `NOTIFY`. |
@@ -150,9 +187,10 @@ MINIO_PUBLIC_ENDPOINT=https://<tu-subdominio>.ngrok-free.app
 ```
 
 > **`--host-header=preserve` no es opcional.** SigV4 firma la cabecera `Host`; si
-> el túnel reescribe el Host hacia el upstream, la descarga falla con
-> `SignatureDoesNotMatch`. El bucket además necesita una regla **CORS** para el
-> origen del SPA.
+> el túnel reescribe el Host hacia el upstream, **tanto la subida (PUT) como la
+> descarga (GET)** fallan con `SignatureDoesNotMatch`. El bucket además necesita
+> una regla **CORS** para el origen del SPA que permita `PUT` y `GET` (la subida
+> prefirmada es un PUT cross-origin → preflight OPTIONS).
 
 Con **S3 real** no hay desdoblamiento: `MINIO_PUBLIC_ENDPOINT` es la propia URL
 del bucket y todo sigue funcionando sin tocar código (presign, multipart y ciclo
@@ -160,20 +198,20 @@ de vida son API estándar de S3). MinIO queda **solo para desarrollo local**.
 
 ---
 
-## 6. Pendiente en `drive-clon-ui`
+## 7. Estado en `drive-clon-ui`
 
-El frontend (repo hermano) todavía llama al endpoint viejo. Migración:
+El frontend (repo hermano) **ya está migrado** a estos flujos, en
+[`src/lib/api/files.ts`](../../../drive-clon-ui/src/lib/api/files.ts):
 
-1. **Quitar** la llamada a `GET /files/folders/{id}/download` (ya no existe).
-2. Al pulsar "Descargar carpeta": `POST /files/folders/{id}/archive` → guardar
-   `job_id`. Mostrar estado "Preparando ZIP…".
-3. **Poll** a `GET /files/archives/{job_id}` cada ~2 s (con backoff) hasta que
-   `status` sea `ready`, `failed` o `expired`.
-4. Si `ready`: abrir `download_url` (`window.location.href = download_url` o un
-   `<a download>`). Si `failed`/`expired`: mostrar el `error` y ofrecer reintentar
-   (un nuevo `POST …/archive`).
+- `uploadFile()` → init (`POST /files`) → `PUT` directo al almacenamiento →
+  `POST /files/{id}/confirm`. Lo usa la drop zone vía `useUploads`.
+- `downloadFolder()` → `POST …/archive` → poll a `GET /files/archives/{job_id}`
+  (intervalo 1.5 s, timeout 120 s) → al estar `ready`, abre `download_url`; si
+  `failed`/`expired`, lanza error.
 
-Esquema de respuesta del poll:
+El antiguo `GET /files/folders/{id}/download` ya no se usa en ningún sitio.
+
+Esquema de respuesta del poll de descarga:
 
 ```json
 {
