@@ -39,6 +39,22 @@ class Settings(BaseSettings):
     KEYCLOAK_ADMIN_CLIENT_ID: str = "driveclon-backend"
     KEYCLOAK_ADMIN_CLIENT_SECRET: str = ""
 
+    # --- MinIO (almacenamiento de objetos, S3-compatible) -----------------
+    # Endpoint host:puerto SIN esquema (el SDK lo añade según MINIO_SECURE).
+    MINIO_ENDPOINT: str = "localhost:9000"
+    MINIO_ACCESS_KEY: str = "minioadmin"
+    MINIO_SECRET_KEY: str = "minioadmin"
+    MINIO_BUCKET: str = "driveclon"
+    # En local va sobre HTTP; en producción debería ir sobre TLS.
+    MINIO_SECURE: bool = False
+
+    # --- Papelera (soft delete + auto-purga) ------------------------------
+    # Días que un elemento permanece en la papelera antes de borrarse
+    # definitivamente (BD + MinIO) por el job programado.
+    TRASH_RETENTION_DAYS: int = 30
+    # Cada cuántas horas se ejecuta el job de auto-purga de la papelera.
+    TRASH_PURGE_INTERVAL_HOURS: int = 24
+
     model_config = SettingsConfigDict(
         env_file=str(env_path),
         case_sensitive=True,

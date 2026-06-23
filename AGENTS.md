@@ -10,8 +10,10 @@ lives in a **sibling repo** `../drive-clon-ui` (React + Vite), which the compose
 by relative path — both repos must be cloned as sibling folders under the same parent.
 
 > POC for experimentation, **not production**. `ARCHITECTURE.md` describes the **target
-> architecture**; much of it (file upload/MinIO, shares, public links) is documented but not
-> yet implemented. Only auth/session + organization provisioning currently exist in code.
+> architecture**; some of it (shares, public links) is documented but not yet implemented.
+> Implemented today: auth/session + organization provisioning, and **folders & files**
+> (root folder per user, nested folders, drag & drop upload to MinIO) — see
+> `docs/PRD/folders-and-files.md` and the `files` route group.
 
 ## Commands
 
@@ -64,7 +66,7 @@ Strict one-directional layering — each layer depends only on the one below:
 ```
 routes/        Presentation: FastAPI routers + Pydantic request/response DTOs. Only orchestrate services.
 services/      Business logic. Depend on gateway interfaces + repositories, never on HTTP details.
-gateways/      Abstractions (ABC) over external systems (Keycloak Admin API). Code depends on the interface.
+gateways/      Abstractions (ABC) over external systems (Keycloak Admin API, MinIO object storage). Code depends on the interface.
 repositories/  Data access over SQLAlchemy async sessions. One class per aggregate.
 models/        SQLAlchemy ORM models (declarative Base from app/db/database.py).
 core/          config.py (pydantic-settings) and security.py (JWT/JWKS validation).
@@ -96,13 +98,58 @@ caller's `org_id`, resolved from the **DB mirror** (by token `sub`), not from th
    in `main.py`); the frontend reacts by forcing a transparent token refresh so the next token
    carries the org membership.
 
+### Folders & files (`files` route group)
+
+A user's **root folder** (`parent_id = NULL`, name `"My Drive"`) is provisioned by
+`EnsureOrganizationService.ensure()` alongside the org — idempotent, guaranteed unique by a
+**partial unique index** on `folders(owner_id) WHERE parent_id IS NULL AND deleted_at IS NULL`.
+The `files` router (`app/routes/files.py` → `FilesService`) exposes:
+
+- `GET /files/root` — caller's root folder.
+- `GET /files?folder_id=<id>` — subfolders + files of a folder (root if omitted).
+- `POST /files/folders` — create a folder (`{ name, parent_id }`).
+- `POST /files` — multipart upload (`file`, `folder_id`) → stored in MinIO, row in Postgres.
+- `GET /files/{file_id}/download` — stream a single file's bytes (Content-Disposition attachment).
+- `GET /files/folders/{folder_id}/download` — stream a ZIP of all files in the folder and its subfolders (built in memory, paths preserved).
+- `DELETE /files/{file_id}` — soft-delete a single file → moves it to the trash (204). The MinIO object is kept.
+- `DELETE /files/folders/{folder_id}` — soft-delete a folder and its whole subtree (subfolders + files) recursively (204). The root folder cannot be deleted (400).
+
+#### Trash (papelera)
+
+Soft delete **is** the trash: an item is "in the trash" when `deleted_at IS NOT NULL`. The
+trash is **per user** (scoped by `owner_id` + `org_id`) and lists only **top-level** trashed
+items — a file whose folder is also trashed, or a subfolder of a trashed folder, is hidden
+(it hangs from its parent and is restored/purged with it).
+
+- `GET /files/trash` — caller's trash: top-level trashed folders + files (with `deleted_at`).
+- `POST /files/{file_id}/restore` — revive a file. Returns `{ id, folder_id }`; if its folder was permanently deleted it is restored to the **root**.
+- `POST /files/folders/{folder_id}/restore` — revive a folder and its whole trashed subtree. Returns `{ id, parent_id }`; restored to the root if its parent no longer exists.
+- `DELETE /files/{file_id}/permanent` — purge a trashed file **for good** (DB row + MinIO object) (204).
+- `DELETE /files/folders/{folder_id}/permanent` — purge a trashed folder and its subtree for good (204).
+- `DELETE /files/trash` — empty the trash: purge everything for good (204).
+
+`/files/trash` is declared **before** `/files/{file_id}` so "trash" is not parsed as an int id.
+Auto-purge: a scheduled job (`app/jobs/trash_purge.py`, APScheduler in the lifespan) permanently
+deletes items trashed more than `TRASH_RETENTION_DAYS` days ago (default 30), every
+`TRASH_PURGE_INTERVAL_HOURS` (default 24) across all orgs.
+
+Object keys are `"{org_id}/{folder_id}/{uuid}-{name}"`. Every query filters `org_id` **and**
+`deleted_at IS NULL`; a folder/file from another tenant resolves as **404** (never leak
+existence). `owner.is_me` is computed by comparing `owner_id` to the caller's DB user id.
+
 ### Key gotchas
 
+- **Object storage (MinIO).** The `minio` SDK is **synchronous**; `MinioObjectStorageGateway`
+  wraps `put_object` in `asyncio.to_thread`. The `driveclon` bucket is created by the
+  `minio-init` job (docker-compose). Config: `MINIO_*` env vars (see `app/core/config.py`).
 - **Internal vs public Keycloak URL.** Inside Docker the backend talks to `http://keycloak:8080`
   but token `iss` is the browser-facing `http://localhost:8080`. `KEYCLOAK_PUBLIC_URL` is
   validated as the issuer; `KEYCLOAK_URL` is used for server-to-server calls (JWKS, Admin API).
 - **Soft delete.** Models carry `deleted_at` (NULL = alive). Queries must filter
   `deleted_at IS NULL` (see `UserRepository.find_by_sub`). Prefer soft deletes over hard deletes.
+  Soft delete doubles as the **trash**; physical deletion of the MinIO object only happens on
+  permanent purge (`/permanent`, empty trash, or the auto-purge job), via
+  `ObjectStorageGateway.remove_objects`.
 - **Async everywhere.** SQLAlchemy uses the asyncpg driver; `Settings.async_database_url`
   rewrites a sync `postgresql://` URL to `postgresql+asyncpg://` automatically.
 - **Migrations run in a thread.** `run_migrations()` offloads Alembic to a worker thread

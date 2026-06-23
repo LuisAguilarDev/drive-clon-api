@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from app.gateways.keycloak_admin_gateway import KeycloakAdminGateway
 from app.models.Organizations import Organizations
 from app.models.Users import Users
+from app.repositories.folder_repository import FolderRepository
 from app.repositories.organization_repository import OrganizationRepository
 from app.repositories.user_repository import UserRepository
 
@@ -18,6 +19,9 @@ from app.repositories.user_repository import UserRepository
 # organizaciones sean únicos, así que se deriva del `sub` (no del dominio real
 # del email, que sería compartido entre usuarios de, p. ej., gmail.com).
 _ORG_DOMAIN_SUFFIX = "users.driveclon.local"
+
+# Nombre de la carpeta raíz que se crea al provisionar al usuario.
+_ROOT_FOLDER_NAME = "My Drive"
 
 
 @dataclass
@@ -35,10 +39,12 @@ class EnsureOrganizationService:
         user_repository: UserRepository,
         organization_repository: OrganizationRepository,
         keycloak_admin: KeycloakAdminGateway,
+        folder_repository: FolderRepository,
     ):
         self._users = user_repository
         self._organizations = organization_repository
         self._keycloak_admin = keycloak_admin
+        self._folders = folder_repository
 
     async def ensure(
         self, keycloak_sub: str, email: str, name: str = "", picture: str = ""
@@ -50,6 +56,8 @@ class EnsureOrganizationService:
             if organization is not None:
                 # Mantiene el espejo local al día con los claims del token.
                 user = await self._users.update_profile(user, name, picture)
+                # Idempotente: garantiza la raíz también para usuarios antiguos.
+                await self._ensure_root_folder(user)
                 return EnsureOrganizationResult(organization, user, provisioned=False)
 
         # Crear la organización en Keycloak y añadir al usuario como miembro.
@@ -77,7 +85,24 @@ class EnsureOrganizationService:
         else:
             user = await self._users.set_org(user, organization.id)
 
+        await self._ensure_root_folder(user)
+
         return EnsureOrganizationResult(organization, user, provisioned=True)
+
+    async def _ensure_root_folder(self, user: Users) -> None:
+        """Crea la carpeta raíz del usuario si aún no existe (parent_id NULL).
+
+        El índice único parcial garantiza una sola raíz viva por usuario; este
+        check evita la condición de carrera más común sin depender del error.
+        """
+        existing = await self._folders.find_root(user.id, user.org_id)
+        if existing is None:
+            await self._folders.create(
+                name=_ROOT_FOLDER_NAME,
+                org_id=user.org_id,
+                owner_id=user.id,
+                parent_id=None,
+            )
 
     @staticmethod
     def _display_name(email: str, name: str) -> str:

@@ -10,8 +10,9 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import CurrentUser
-from app.db.database import SessionLocal
+from app.db.database import get_db
 from app.gateways.keycloak_admin_gateway import keycloak_admin_gateway
+from app.repositories.folder_repository import FolderRepository
 from app.repositories.organization_repository import OrganizationRepository
 from app.repositories.user_repository import UserRepository
 from app.services.ensure_organization_service import EnsureOrganizationService
@@ -22,11 +23,6 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # todavía no trae el claim. El frontend reacciona a esta cabecera forzando un
 # refresh transparente (keycloak.updateToken) para que el token nuevo lo incluya.
 ORG_PROVISIONED_HEADER = "X-Org-Provisioned"
-
-
-async def get_db():
-    async with SessionLocal() as db:
-        yield db
 
 
 db_dependency = Annotated[AsyncSession, Depends(get_db)]
@@ -52,6 +48,7 @@ async def get_session(user: CurrentUser, db: db_dependency, response: Response):
         user_repository=UserRepository(db),
         organization_repository=OrganizationRepository(db),
         keycloak_admin=keycloak_admin_gateway,
+        folder_repository=FolderRepository(db),
     )
     result = await service.ensure(
         keycloak_sub=user.sub,

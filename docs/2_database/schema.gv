@@ -2,11 +2,12 @@
 // Drive Clon — Esquema de base de datos (Postgres)
 //
 // Diagrama entidad-relación en notación DOT (Graphviz). Refleja los modelos de
-// `app/models/` y la migración inicial `979bd579e739_initial_schema`.
+// `app/models/`. La tabla `folders` y los campos extendidos de `files`
+// (PRD docs/PRD/folders-and-files.md) ya están migrados (revisión 1a2b3c4d5e6f).
 //
 // Render:
-//   dot -Tpng docs/database/schema.dot -o docs/database/schema.png
-//   dot -Tsvg docs/database/schema.dot -o docs/database/schema.svg
+//   dot -Tpng docs/2_database/schema.gv -o docs/2_database/schema.png
+//   dot -Tsvg docs/2_database/schema.gv -o docs/2_database/schema.svg
 //
 // Leyenda de constraints: PK = primary key, FK = foreign key, U = unique,
 // IX = index, NN = not null, NULL = nullable.
@@ -37,6 +38,11 @@ digraph driveclon_db {
         <TD ALIGN="LEFT">name</TD>
         <TD ALIGN="LEFT">varchar</TD>
         <TD ALIGN="LEFT">NN</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT">deleted_at</TD>
+        <TD ALIGN="LEFT">timestamp</TD>
+        <TD ALIGN="LEFT">NULL</TD>
       </TR>
     </TABLE>>];
 
@@ -74,6 +80,52 @@ digraph driveclon_db {
         <TD ALIGN="LEFT">integer</TD>
         <TD ALIGN="LEFT">FK, NULL</TD>
       </TR>
+      <TR>
+        <TD ALIGN="LEFT">deleted_at</TD>
+        <TD ALIGN="LEFT">timestamp</TD>
+        <TD ALIGN="LEFT">NULL</TD>
+      </TR>
+    </TABLE>>];
+
+  // --------------------------------------------------------------------- folders
+  folders [label=<
+    <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="5">
+      <TR><TD BGCOLOR="#6b46c1" COLSPAN="3"><FONT COLOR="white"><B>folders</B></FONT></TD></TR>
+      <TR>
+        <TD ALIGN="LEFT" PORT="id"><B>id</B></TD>
+        <TD ALIGN="LEFT">integer</TD>
+        <TD ALIGN="LEFT">PK, IX</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT">name</TD>
+        <TD ALIGN="LEFT">varchar</TD>
+        <TD ALIGN="LEFT">NN</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT" PORT="org_id">org_id</TD>
+        <TD ALIGN="LEFT">integer</TD>
+        <TD ALIGN="LEFT">FK, NN, IX</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT" PORT="owner_id">owner_id</TD>
+        <TD ALIGN="LEFT">integer</TD>
+        <TD ALIGN="LEFT">FK, NN, IX</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT" PORT="parent_id">parent_id</TD>
+        <TD ALIGN="LEFT">integer</TD>
+        <TD ALIGN="LEFT">FK, NULL, IX</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT">created_at</TD>
+        <TD ALIGN="LEFT">timestamp</TD>
+        <TD ALIGN="LEFT">NN</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT">deleted_at</TD>
+        <TD ALIGN="LEFT">timestamp</TD>
+        <TD ALIGN="LEFT">NULL</TD>
+      </TR>
     </TABLE>>];
 
   // ----------------------------------------------------------------------- files
@@ -86,25 +138,65 @@ digraph driveclon_db {
         <TD ALIGN="LEFT">PK, IX</TD>
       </TR>
       <TR>
-        <TD ALIGN="LEFT">address</TD>
+        <TD ALIGN="LEFT">name</TD>
         <TD ALIGN="LEFT">varchar</TD>
-        <TD ALIGN="LEFT">NULL, IX</TD>
+        <TD ALIGN="LEFT">NN</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT">object_key</TD>
+        <TD ALIGN="LEFT">varchar</TD>
+        <TD ALIGN="LEFT">NN</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT">content_type</TD>
+        <TD ALIGN="LEFT">varchar</TD>
+        <TD ALIGN="LEFT">NULL</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT">size_bytes</TD>
+        <TD ALIGN="LEFT">bigint</TD>
+        <TD ALIGN="LEFT">NULL</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT" PORT="folder_id">folder_id</TD>
+        <TD ALIGN="LEFT">integer</TD>
+        <TD ALIGN="LEFT">FK, NN, IX</TD>
       </TR>
       <TR>
         <TD ALIGN="LEFT" PORT="org_id">org_id</TD>
         <TD ALIGN="LEFT">integer</TD>
-        <TD ALIGN="LEFT">FK, NULL, IX</TD>
+        <TD ALIGN="LEFT">FK, NN, IX</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT" PORT="owner_id">owner_id</TD>
+        <TD ALIGN="LEFT">integer</TD>
+        <TD ALIGN="LEFT">FK, NN, IX</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT">created_at</TD>
+        <TD ALIGN="LEFT">timestamp</TD>
+        <TD ALIGN="LEFT">NN</TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT">deleted_at</TD>
+        <TD ALIGN="LEFT">timestamp</TD>
+        <TD ALIGN="LEFT">NULL</TD>
       </TR>
     </TABLE>>];
 
   // ------------------------------------------------------------------- relaciones
-  // Muchos users pertenecen a una organización (org_id nullable).
-  users:org_id -> organizations:id [
-    taillabel="N", headlabel="1",
-    arrowtail=crow, arrowhead=tee, label="org_id"];
+  // users / folders / files pertenecen a una organización (tenant).
+  users:org_id     -> organizations:id [taillabel="N", headlabel="1", arrowtail=crow, arrowhead=tee, label="org_id"];
+  folders:org_id   -> organizations:id [taillabel="N", headlabel="1", arrowtail=crow, arrowhead=tee, label="org_id"];
+  files:org_id     -> organizations:id [taillabel="N", headlabel="1", arrowtail=crow, arrowhead=tee, label="org_id"];
 
-  // Muchos files pertenecen a una organización (aislamiento de tenant).
-  files:org_id -> organizations:id [
-    taillabel="N", headlabel="1",
-    arrowtail=crow, arrowhead=tee, label="org_id"];
+  // Propietario (owner) de folders y files.
+  folders:owner_id -> users:id [taillabel="N", headlabel="1", arrowtail=crow, arrowhead=tee, label="owner_id", color="#2f855a"];
+  files:owner_id   -> users:id [taillabel="N", headlabel="1", arrowtail=crow, arrowhead=tee, label="owner_id", color="#2f855a"];
+
+  // Jerarquía de carpetas (parent_id auto-referencia; NULL = root).
+  folders:parent_id -> folders:id [taillabel="N", headlabel="1", arrowtail=crow, arrowhead=tee, label="parent_id", color="#6b46c1"];
+
+  // Cada file vive dentro de una carpeta.
+  files:folder_id  -> folders:id [taillabel="N", headlabel="1", arrowtail=crow, arrowhead=tee, label="folder_id", color="#6b46c1"];
 }

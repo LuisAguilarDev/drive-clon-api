@@ -23,6 +23,12 @@ SessionLocal = async_sessionmaker(
 Base = declarative_base()
 
 
+async def get_db():
+    """Dependency de FastAPI: abre una `AsyncSession` por request y la cierra."""
+    async with SessionLocal() as db:
+        yield db
+
+
 def _upgrade_to_head() -> None:
     """Aplica las migraciones de Alembic hasta `head` (síncrono)."""
     from alembic import command
