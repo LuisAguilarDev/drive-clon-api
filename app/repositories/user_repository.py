@@ -36,7 +36,7 @@ class UserRepository:
         estable, así que actualizamos el `sub` en vez de duplicar el usuario.
         """
         user.keycloak_sub = keycloak_sub
-        await self.db.commit()
+        await self.db.flush()
         await self.db.refresh(user)
         return user
 
@@ -56,13 +56,15 @@ class UserRepository:
             org_id=org_id,
         )
         self.db.add(user)
-        await self.db.commit()
+        # flush (no commit): emite el INSERT y rellena el id generado dentro de la
+        # transacción; el commit único lo hace `get_db`.
+        await self.db.flush()
         await self.db.refresh(user)
         return user
 
     async def set_org(self, user: Users, org_id: int) -> Users:
         user.org_id = org_id
-        await self.db.commit()
+        await self.db.flush()
         await self.db.refresh(user)
         return user
 
@@ -79,7 +81,7 @@ class UserRepository:
         user.name = ""
         user.picture = ""
         user.deleted_at = func.now()
-        await self.db.commit()
+        await self.db.flush()
 
     async def update_profile(self, user: Users, name: str, picture: str) -> Users:
         """Sincroniza nombre/avatar desde el token si cambiaron (no pisa con vacío)."""
@@ -91,6 +93,6 @@ class UserRepository:
             user.picture = picture
             changed = True
         if changed:
-            await self.db.commit()
+            await self.db.flush()
             await self.db.refresh(user)
         return user

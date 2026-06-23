@@ -20,7 +20,9 @@ class OrganizationRepository:
     async def create(self, keycloak_org_id: str, name: str) -> Organizations:
         organization = Organizations(keycloak_org_id=keycloak_org_id, name=name)
         self.db.add(organization)
-        await self.db.commit()
+        # flush (no commit): emite el INSERT y rellena el id generado dentro de la
+        # transacción; el commit único lo hace `get_db`.
+        await self.db.flush()
         await self.db.refresh(organization)
         return organization
 
@@ -36,4 +38,3 @@ class OrganizationRepository:
             )
             .values(deleted_at=func.now())
         )
-        await self.db.commit()

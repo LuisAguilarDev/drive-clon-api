@@ -180,6 +180,13 @@ Object keys are `"{org_id}/{folder_id}/{uuid}-{name}"`. Every query filters `org
   `ObjectStorageGateway.remove_objects` and sets `status='deleted'`, keeping the row for analytics.
 - **Soft delete (other models).** `organizations`/`users` still use `deleted_at` (NULL = alive);
   those queries filter `deleted_at IS NULL` (see `UserRepository.find_by_sub`).
+- **Transactions / unit of work.** The **request boundary owns the single `commit`**, not the
+  repositories. `get_db` (`app/db/database.py`) commits once after the endpoint returns and
+  rolls back on any exception, so a service operation spanning several writes (e.g. soft-deleting
+  a folder subtree = trash its files **and** its folders) is **atomic** — all or nothing.
+  Repositories therefore only `flush()` (to obtain generated ids); they must **never** call
+  `commit()`. Code that runs outside the request cycle and opens its own `SessionLocal` (the
+  `trash_purge` job) owns its unit of work and must `commit()`/`rollback()` itself.
 - **Async everywhere.** SQLAlchemy uses the asyncpg driver; `Settings.async_database_url`
   rewrites a sync `postgresql://` URL to `postgresql+asyncpg://` automatically.
 - **Migrations run in a thread.** `run_migrations()` offloads Alembic to a worker thread

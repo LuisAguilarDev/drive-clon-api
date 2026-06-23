@@ -29,11 +29,15 @@ async def purge_expired_trash() -> None:
         )
         try:
             purged = await service.purge_expired(settings.TRASH_RETENTION_DAYS)
+            # El job corre fuera de `get_db`, así que es dueño de su unidad de
+            # trabajo: confirma (o revierte) la sesión él mismo.
+            await db.commit()
             if purged:
                 logger.info(
                     "Auto-purga de papelera: %d elementos borrados.", purged
                 )
         except Exception:
-            # Un fallo del job no debe tumbar el scheduler: se registra y se
-            # reintenta en la siguiente ejecución programada.
+            # Un fallo del job no debe tumbar el scheduler: se registra, se
+            # revierte la transacción y se reintenta en la siguiente ejecución.
+            await db.rollback()
             logger.exception("Fallo en la auto-purga de la papelera.")

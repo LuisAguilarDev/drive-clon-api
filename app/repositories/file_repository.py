@@ -65,7 +65,6 @@ class FileRepository:
             )
             .values(status=ResourceStatus.TRASHED, trashed_at=func.now())
         )
-        await self.db.commit()
         return (result.rowcount or 0) > 0
 
     async def soft_delete_in_folders(
@@ -83,7 +82,6 @@ class FileRepository:
             )
             .values(status=ResourceStatus.TRASHED, trashed_at=func.now())
         )
-        await self.db.commit()
 
     # --- Papelera --------------------------------------------------------
     async def list_trashed(self, owner_id: int, org_id: int) -> list[Files]:
@@ -148,7 +146,6 @@ class FileRepository:
                 folder_id=folder_id,
             )
         )
-        await self.db.commit()
 
     async def restore_in_folders(
         self, folder_ids: list[int], org_id: int
@@ -165,7 +162,6 @@ class FileRepository:
             )
             .values(status=ResourceStatus.ACTIVE, trashed_at=None)
         )
-        await self.db.commit()
 
     # --- Borrado permanente (purga: BD conservada + MinIO eliminado) -----
     async def object_keys_in_folders(
@@ -202,7 +198,6 @@ class FileRepository:
             )
             .values(status=ResourceStatus.DELETED, deleted_at=func.now())
         )
-        await self.db.commit()
 
     async def mark_purged_in_folders(
         self, folder_ids: list[int], org_id: int
@@ -219,7 +214,6 @@ class FileRepository:
             )
             .values(status=ResourceStatus.DELETED, deleted_at=func.now())
         )
-        await self.db.commit()
 
     # --- Cierre de cuenta (purga toda la org, conservando filas) ---------
     async def all_object_keys_in_org(self, org_id: int) -> list[str]:
@@ -244,7 +238,6 @@ class FileRepository:
             )
             .values(status=ResourceStatus.DELETED, deleted_at=func.now())
         )
-        await self.db.commit()
 
     async def create(
         self,
@@ -266,6 +259,8 @@ class FileRepository:
             owner_id=owner_id,
         )
         self.db.add(file)
-        await self.db.commit()
+        # flush (no commit): emite el INSERT y rellena el id/created_at generados
+        # dentro de la transacción; el commit único lo hace `get_db`.
+        await self.db.flush()
         await self.db.refresh(file)
         return file

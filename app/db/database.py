@@ -18,6 +18,17 @@ Base = declarative_base()
 
 
 async def get_db():
-    """Dependency de FastAPI: abre una `AsyncSession` por request y la cierra."""
+    """Dependency de FastAPI: una `AsyncSession` y UN `commit` por request.
+
+    La unidad de trabajo vive en el borde de la petición, no en los repositorios:
+    éstos sólo hacen `flush()` (para obtener ids generados). Así una operación de
+    servicio que abarca varias escrituras es atómica —si algo falla, `rollback`
+    deshace TODO— en vez de dejar commits parciales (árboles corruptos).
+    """
     async with SessionLocal() as db:
-        yield db
+        try:
+            yield db
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise

@@ -69,7 +69,6 @@ class FolderRepository:
             )
             .values(status=ResourceStatus.TRASHED, trashed_at=func.now())
         )
-        await self.db.commit()
 
     # --- Papelera --------------------------------------------------------
     async def list_trashed(self, owner_id: int, org_id: int) -> list[Folders]:
@@ -163,7 +162,6 @@ class FolderRepository:
             )
             .values(status=ResourceStatus.ACTIVE, trashed_at=None)
         )
-        await self.db.commit()
 
     async def reattach(
         self, folder_id: int, org_id: int, parent_id: int
@@ -175,7 +173,6 @@ class FolderRepository:
             .where(Folders.id == folder_id, Folders.org_id == org_id)
             .values(parent_id=parent_id)
         )
-        await self.db.commit()
 
     # --- Borrado permanente (purga: BD conservada) -----------------------
     async def mark_purged_in_ids(
@@ -194,7 +191,6 @@ class FolderRepository:
             )
             .values(status=ResourceStatus.DELETED, deleted_at=func.now())
         )
-        await self.db.commit()
 
     # --- Cierre de cuenta (purga toda la org, conservando filas) ---------
     async def mark_purged_in_org(self, org_id: int) -> None:
@@ -208,7 +204,6 @@ class FolderRepository:
             )
             .values(status=ResourceStatus.DELETED, deleted_at=func.now())
         )
-        await self.db.commit()
 
     async def create(
         self, name: str, org_id: int, owner_id: int, parent_id: int | None
@@ -217,6 +212,8 @@ class FolderRepository:
             name=name, org_id=org_id, owner_id=owner_id, parent_id=parent_id
         )
         self.db.add(folder)
-        await self.db.commit()
+        # flush (no commit): emite el INSERT y rellena el id generado dentro de la
+        # transacción; el commit único lo hace `get_db`.
+        await self.db.flush()
         await self.db.refresh(folder)
         return folder
